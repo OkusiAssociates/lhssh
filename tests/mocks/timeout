@@ -1,0 +1,26 @@
+#!/usr/bin/bash
+# Mock timeout for testing
+# Strips timeout args and runs the actual command
+# Respects MOCK_TIMEOUT_EXIT to simulate timeout failures
+set -euo pipefail
+
+# Skip timeout's own arguments
+while (($#)); do
+  case $1 in
+    --kill-after=*) shift; continue ;;
+    --kill-after) shift 2; continue ;;
+    -*)  shift; continue ;;
+    *)
+      # First non-option is the duration, skip it
+      shift
+      break
+      ;;
+  esac
+done
+
+if [[ -n "${MOCK_TIMEOUT_EXIT:-}" ]]; then
+  exit "$MOCK_TIMEOUT_EXIT"
+fi
+
+# Execute the remaining command
+exec "$@"

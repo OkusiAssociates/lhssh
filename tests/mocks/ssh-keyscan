@@ -1,0 +1,45 @@
+#!/usr/bin/bash
+# Mock ssh-keyscan for testing
+# Responds to hosts listed in MOCK_SSH_HOSTS (space-separated IPs)
+# Supports both positional host arg and -f - (stdin) mode
+set -euo pipefail
+
+declare -- host=''
+declare -i stdin_mode=0
+
+while (($#)); do
+  case $1 in
+    -T|-t) shift ;; # consume the argument value
+    -f)
+      shift
+      [[ "${1:-}" == '-' ]] && stdin_mode=1
+      ;;
+    -*) ;;
+    *) host=$1 ;;
+  esac
+  shift
+done
+
+declare -- mock_hosts="${MOCK_SSH_HOSTS:-}"
+
+# stdin mode: read hosts line by line
+if ((stdin_mode)); then
+  while IFS= read -r host; do
+    [[ -n "$host" ]] || continue
+    if [[ " $mock_hosts " == *" $host "* ]]; then
+      echo "$host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockKeyData"
+    fi
+  done
+  exit 0
+fi
+
+if [[ -z "$host" ]]; then
+  exit 1
+fi
+
+# Check if this host is in our mock list
+if [[ " $mock_hosts " == *" $host "* ]]; then
+  echo "$host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockKeyData"
+fi
+
+exit 0

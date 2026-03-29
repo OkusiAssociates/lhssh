@@ -1,0 +1,28 @@
+#!/usr/bin/bash
+# Mock ping6 for testing IPv6 multicast discovery
+# Emits fake responses from MOCK_PING6_RESPONSES (newline-separated addresses)
+set -euo pipefail
+
+declare -- target=''
+while (($#)); do
+  case $1 in
+    -c|-W) shift ;; # consume the argument value
+    -*) ;;
+    *) target=$1 ;;
+  esac
+  shift
+done
+
+# Only respond to multicast targets
+if [[ "$target" != ff02::1%* ]]; then
+  exit 1
+fi
+
+# Emit mock responses in ping6 output format
+declare -- addr
+while IFS= read -r addr; do
+  [[ -n "$addr" ]] || continue
+  echo "64 bytes from ${addr}: icmp_seq=1 ttl=64 time=0.5 ms"
+done <<< "${MOCK_PING6_RESPONSES:-}"
+
+exit 0

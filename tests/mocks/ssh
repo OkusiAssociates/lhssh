@@ -1,0 +1,21 @@
+#!/usr/bin/bash
+# Mock ssh for testing
+# Records invocation args; simulates success or failure based on MOCK_SSH_EXIT
+set -euo pipefail
+
+# Record the call for assertion
+if [[ -n "${MOCK_SSH_LOG:-}" ]]; then
+  echo "$*" >> "$MOCK_SSH_LOG"
+fi
+
+# If a mock command output is set, print it
+if [[ -n "${MOCK_SSH_OUTPUT:-}" ]]; then
+  echo "$MOCK_SSH_OUTPUT"
+fi
+
+# If a mock stderr is set, print it
+if [[ -n "${MOCK_SSH_STDERR:-}" ]]; then
+  >&2 echo "$MOCK_SSH_STDERR"
+fi
+
+exit "${MOCK_SSH_EXIT:-0}"

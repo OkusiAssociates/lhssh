@@ -1,0 +1,578 @@
+#!/usr/bin/bash
+# lhssh v2.0 - Local Host SSH Scanner and Connection Manager
+#
+# Description:
+#   A modern, dependency-free bash utility for scanning and managing SSH connections
+#   to hosts on the local network. Supports parallel scanning, colored output,
+#   and flexible configuration.
+#
+# Dependencies:
+#   - ssh (OpenSSH client)
+#   - ssh-keyscan OR nc (netcat) for network scanning
+#   - timeout (coreutils)
+#   - Standard Unix tools: grep, sort, xargs, awk, getent, tput, realpath
+#
+# Author: OKUSI Project
+# Version: 2.0.0
+# License: GPL-3.0
+set -euo pipefail
+shopt -s inherit_errexit
+
+declare -r VERSION=2.0.0
+#shellcheck disable=SC2155
+declare -r SCRIPT_PATH=$(realpath -- "$0")
+#shellcheck disable=SC2034  # BCS0104: standard metadata
+declare -r SCRIPT_DIR=${SCRIPT_PATH%/*}
+declare -r SCRIPT_NAME=${SCRIPT_PATH##*/}
+
+declare -r CONFIG_FILE="$HOME"/."$SCRIPT_NAME".conf
+
+# Default configuration variables
+# These can be overridden in ~/.lhssh.conf
+declare -- LOCALHOST_HEAD='192.168.1.'      # Network prefix (must end with dot)
+declare -i LOCALHOST_START_IP=50            # First IP in scan range (last octet)
+declare -i LOCALHOST_END_IP=230             # Last IP in scan range (last octet)
+declare -- LOGIN_USERNAME=${USER:-root}     # SSH login username
+declare -i SHORT_DISPLAY=0                  # Show IP addresses only (no hostnames)
+declare -i SUPER_SHORT=0                    # Show last octet only
+declare -i SSH_CONNECT_TIMEOUT=10           # SSH connection timeout (seconds)
+declare -i SSH_SESSION_TIMEOUT=600          # SSH session timeout (seconds)
+declare -i VERBOSE=0                        # Verbosity level (0=normal, 1=info, 2=debug)
+declare -i COLOR_OUTPUT=1                   # Enable colored output (0=disable)
+declare -i PARALLEL_SCAN=1                  # Use parallel scanning (0=sequential)
+declare -i IPV6_SCAN=0                      # Scan IPv6 instead of IPv4
+declare -- IPV6_INTERFACE=''                 # IPv6 interface (empty=auto-detect)
+
+# Color codes (readonly; --no-color controls output via COLOR_OUTPUT flag)
+if [[ -t 1 && -t 2 ]] && [[ -z "${NO_COLOR:-}" ]] && tput colors &>/dev/null; then
+  declare -r RED=$'\033[0;31m' YELLOW=$'\033[0;33m' BLUE=$'\033[0;34m' NC=$'\033[0m'
+else
+  declare -r RED='' YELLOW='' BLUE='' NC=''
+  COLOR_OUTPUT=0
+fi
+
+# Validate that an option's required argument is present
+# Usage: require_arg "$@" (call before shift in option parsing)
+require_arg() { (($# > 1)) || { log_error "Option ${1@Q} requires an argument"; return 22; }; }
+
+log() {
+  local -- level=$1
+  shift
+  local -- message="$*"
+  # Use local copies so --no-color works with readonly color vars
+  local -- r='' y='' b='' n=''
+  if ((COLOR_OUTPUT)); then
+    r=$RED y=$YELLOW b=$BLUE n=$NC
+  fi
+
+  case "$level" in
+    ERROR)
+      >&2 echo -e "${r}[ERROR]${n} $message"
+      ;;
+    WARN)
+      ((VERBOSE >= 0)) || return 0
+      >&2 echo -e "${y}[WARN]${n} $message"
+      ;;
+    INFO)
+      ((VERBOSE >= 1)) || return 0
+      >&2 echo -e "${b}[INFO]${n} $message"
+      ;;
+    DEBUG)
+      ((VERBOSE >= 2)) || return 0
+      >&2 echo -e "[DEBUG] $message"
+      ;;
+    *)
+      echo "$message"
+      ;;
+  esac
+}
+
+# Convenience logging functions
+log_error() { log ERROR "$@"; }
+log_warn() { log WARN "$@"; }
+log_info() { log INFO "$@"; }
+log_debug() { log DEBUG "$@"; }
+
+error_msg() {
+  local -i exit_code=$1
+  case $exit_code in
+    0)   echo 'Success' ;;
+    1)   echo 'General error' ;;
+    2)   echo 'Usage error' ;;
+    3)   echo 'No such file or directory' ;;
+    8)   echo 'Required argument missing' ;;
+    9)   echo 'Value out of range' ;;
+    22)  echo 'Invalid argument' ;;
+    23)  echo 'Network error' ;;
+    24)  echo 'Operation timed out' ;;
+    25)  echo 'Host unreachable' ;;
+    126) echo 'Command cannot execute' ;;
+    127) echo 'Command not found' ;;
+    130) echo 'Interrupted by Ctrl+C' ;;
+    255) echo 'SSH connection failed' ;;
+    *)   echo "Unknown error (code: $exit_code)" ;;
+  esac
+}
+
+cleanup() {
+  trap - SIGINT SIGTERM EXIT
+  local -i exit_code=${1:-$?}
+  # Only log error if it's not an SSH connection failure (255)
+  # SSH already provides detailed error messages
+  if ((exit_code != 0 && exit_code != 255)); then
+    log_error "Exit: $(error_msg "$exit_code")"
+  fi
+  exit "$exit_code"
+}
+
+trap 'cleanup $?' SIGINT SIGTERM EXIT
+
+show_help() {
+  cat <<HELP
+$SCRIPT_NAME $VERSION - Local Host SSH Scanner and Connection Manager
+
+USAGE:
+  $SCRIPT_NAME [OPTIONS] [TARGET [COMMAND...]]
+
+DESCRIPTION:
+  Scan local network for SSH hosts and connect to them easily.
+  TARGET can be a short octet (152), full IPv4 (192.168.1.152), or IPv6 address.
+
+OPTIONS:
+  -h, --help              Show this help message
+  -V, --version           Show version information
+  -v, --verbose           Enable verbose output (use -vv for debug)
+  -q, --quiet             Disable all non-essential output
+
+  Display Options:
+  -s, --short             Show IP addresses only
+  -p, --supershort        Show only last octet of IP addresses
+  -C, --no-color          Disable colored output
+
+  Network Options:
+  -n, --network PREFIX    Set network prefix or CIDR /24 (default: $LOCALHOST_HEAD)
+  -b, --begin IP          Start IP for scanning (default: $LOCALHOST_START_IP)
+  -f, --finish IP         End IP for scanning (default: $LOCALHOST_END_IP)
+  -6, --ipv6              Scan IPv6 link-local neighbors instead of IPv4
+  -I, --interface IFACE   Network interface for IPv6 scanning (default: auto)
+
+  SSH Options:
+  -u, --user USERNAME     SSH username (default: $LOGIN_USERNAME)
+  -t, --timeout SECS      Connection timeout (default: $SSH_CONNECT_TIMEOUT)
+  -T, --session-time SECS Session timeout (default: $SSH_SESSION_TIMEOUT)
+
+  Configuration:
+  -l, --list              Show current configuration
+  -e, --edit              Edit configuration file
+  -S, --save-config       Save current options to configuration file
+
+EXAMPLES:
+  # Scan network for SSH hosts
+  $SCRIPT_NAME
+
+  # Connect to host .152
+  $SCRIPT_NAME 152
+
+  # Run command on host
+  $SCRIPT_NAME 152 uptime
+
+  # Scan different network range
+  $SCRIPT_NAME -n 10.0.0. -b 1 -f 50
+
+  # Scan CIDR /24 network
+  $SCRIPT_NAME -n 10.99.10.0/24
+
+  # Scan IPv6 neighbors for SSH hosts
+  $SCRIPT_NAME -6
+
+  # Scan IPv6 on a specific interface
+  $SCRIPT_NAME -6 -I eth0
+
+  # Connect to an IPv6 host
+  $SCRIPT_NAME fe80::1%enp12s0 hostname
+
+  # Execute command on all hosts
+  for ip in \$($SCRIPT_NAME -p); do
+    $SCRIPT_NAME \$ip "hostname -f"
+  done
+
+CONFIGURATION FILE:
+  $CONFIG_FILE
+HELP
+}
+
+create_config_file() {
+  cat > "$CONFIG_FILE" <<CONFIG
+#!/bin/bash
+# $SCRIPT_NAME: Display ssh accessible localhosts / Run commands on localhosts
+# localhost header (e.g. 192.168.1.); omit last number; end with dot
+LOCALHOST_HEAD='$LOCALHOST_HEAD'
+# start scanning from this IP
+LOCALHOST_START_IP=$LOCALHOST_START_IP
+# stop scanning at this IP
+LOCALHOST_END_IP=$LOCALHOST_END_IP
+# ssh login username
+LOGIN_USERNAME='$LOGIN_USERNAME'
+# short display of IPs only
+SHORT_DISPLAY=$SHORT_DISPLAY
+# supershort display (last number of IP only)
+SUPER_SHORT=$SUPER_SHORT
+# ssh connect timeout in seconds
+SSH_CONNECT_TIMEOUT=$SSH_CONNECT_TIMEOUT
+# ssh session timeout in seconds
+SSH_SESSION_TIMEOUT=$SSH_SESSION_TIMEOUT
+# enable colored output
+COLOR_OUTPUT=$COLOR_OUTPUT
+# use parallel scanning (faster)
+PARALLEL_SCAN=$PARALLEL_SCAN
+# IPv6 network interface for scanning (empty=auto-detect from default route)
+IPV6_INTERFACE='$IPV6_INTERFACE'
+CONFIG
+  chmod 600 "$CONFIG_FILE"
+  log_info "Created configuration file ${CONFIG_FILE@Q}"
+}
+
+load_config() {
+  if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE" || {
+      log_error "Failed to load config file ${CONFIG_FILE@Q}"
+      return 1
+    }
+  else
+    create_config_file
+  fi
+}
+
+# Generate IP list for a scan range to stdout
+# Args: start_ip end_ip (last octets only)
+generate_ip_list() {
+  local -i ip
+  for ((ip=$1; ip<=$2; ip+=1)); do
+    printf '%s\n' "${LOCALHOST_HEAD}${ip}"
+  done
+}
+
+detect_ipv6_interface() {
+  local -- iface
+  iface=$(ip -6 route show default 2>/dev/null | awk '{print $5}' | head -1)
+  if [[ -z "$iface" ]]; then
+    log_error 'No IPv6 default route found; specify interface with -I'
+    return 1
+  fi
+  printf '%s\n' "$iface"
+}
+
+# Discover IPv6 neighbors via all-nodes multicast ping
+discover_ipv6_neighbors() {
+  local -- iface=$1
+  ping6 -c 2 -W 300 "ff02::1%${iface}" 2>/dev/null \
+    | awk '/from /{print $4}' \
+    | sed 's/:$//' \
+    | sort -u
+}
+
+scan_ipv6_hosts() {
+  local -- iface=${IPV6_INTERFACE:-}
+  if [[ -z "$iface" ]]; then
+    iface=$(detect_ipv6_interface) || return 1
+  fi
+
+  log_info "Scanning IPv6 hosts on interface ${iface}"
+
+  discover_ipv6_neighbors "$iface" \
+    | ssh-keyscan -T 1 -t ed25519 -f - 2>/dev/null \
+    | awk '{print $1}' \
+    | sort -u
+}
+
+scan_ssh_hosts_keyscan() {
+  local -- start_ip=$1 end_ip=$2
+
+  log_info "Scanning hosts ${LOCALHOST_HEAD}${start_ip}-${end_ip} using ssh-keyscan"
+
+  # ssh-keyscan handles concurrency natively via -f -; single key type suffices for detection
+  if ((PARALLEL_SCAN)); then
+    generate_ip_list "$start_ip" "$end_ip" | \
+      ssh-keyscan -T 1 -t ed25519 -f - 2>/dev/null | awk '{print $1}' | sort -u
+  else
+    local -- host
+    while IFS= read -r host; do
+      if ssh-keyscan -T 1 -t ed25519 "$host" 2>/dev/null | grep -q "^$host "; then
+        echo "$host"
+      fi
+    done < <(generate_ip_list "$start_ip" "$end_ip")
+  fi
+}
+
+scan_ssh_hosts_nc() {
+  local -- start_ip=$1 end_ip=$2
+
+  log_info "Scanning hosts ${LOCALHOST_HEAD}${start_ip}-${end_ip} using netcat"
+
+  if ((PARALLEL_SCAN)); then
+    #shellcheck disable=SC2016  # $1 expands inside inner sh, not outer bash
+    generate_ip_list "$start_ip" "$end_ip" | \
+      xargs -P 20 -I {} sh -c 'nc -z -w1 "$1" 22 2>/dev/null && echo "$1"' _ {}
+  else
+    local -- host
+    while IFS= read -r host; do
+      if nc -z -w1 "$host" 22 2>/dev/null; then
+        echo "$host"
+      fi
+    done < <(generate_ip_list "$start_ip" "$end_ip")
+  fi
+}
+
+#shellcheck disable=SC2120
+scan_hosts() {
+  if ((IPV6_SCAN)); then
+    scan_ipv6_hosts
+    return
+  fi
+
+  local -- start_ip=${1:-$LOCALHOST_START_IP}
+  local -- end_ip=${2:-$LOCALHOST_END_IP}
+
+  if command -v ssh-keyscan >/dev/null 2>&1; then
+    scan_ssh_hosts_keyscan "$start_ip" "$end_ip"
+  elif command -v nc >/dev/null 2>&1; then
+    scan_ssh_hosts_nc "$start_ip" "$end_ip"
+  else
+    log_error 'No suitable scanning tool found (ssh-keyscan or nc required)'
+    return 1
+  fi
+}
+
+format_output() {
+  local -i is_ipv6=0
+  [[ "${1:-}" == *:* ]] && is_ipv6=1
+
+  local -a hosts
+  if ((is_ipv6)); then
+    mapfile -t hosts < <(printf '%s\n' "$@" | sort)
+  else
+    mapfile -t hosts < <(printf '%s\n' "$@" | sort -t. -k4 -n)
+  fi
+  local -- host
+
+  if ((SUPER_SHORT)); then
+    if ((is_ipv6)); then
+      # No meaningful short form for IPv6; output full address
+      printf '%s\n' "${hosts[@]}"
+    else
+      for host in "${hosts[@]}"; do
+        echo "${host##*.}"
+      done
+    fi
+  elif ((SHORT_DISPLAY)); then
+    printf '%s\n' "${hosts[@]}"
+  else
+    echo 'SSH Hosts Found:'
+    echo '================'
+    local -- hostname col_width=15
+    ((is_ipv6)) && col_width=45
+    for host in "${hosts[@]}"; do
+      hostname=$(getent hosts "$host" 2>/dev/null | awk '{print $2}' || echo "")
+      if [[ -n "$hostname" ]]; then
+        printf "%-${col_width}s %s\n" "$host" "($hostname)"
+      else
+        echo "$host"
+      fi
+    done
+  fi
+}
+
+ssh_connect() {
+  local -- target=$1
+  shift
+  local -a ssh_args=("$@")
+
+  # IPv6 (colon) passes through; short octet expands via LOCALHOST_HEAD; dotted IPv4 passes through
+  if [[ "$target" =~ : ]]; then
+    if [[ ! "$target" =~ ^[a-fA-F0-9:.]+(%[a-zA-Z0-9._-]+)?$ ]]; then
+      log_error "Invalid IPv6 address ${target@Q}"
+      return 22
+    fi
+  elif [[ ! "$target" =~ \. ]]; then
+    if [[ ! "$target" =~ ^[0-9]+$ ]] || ((target < 1 || target > 254)); then
+      log_error "Invalid IP octet ${target@Q} (must be 1-254)"
+      return 22
+    fi
+    target="${LOCALHOST_HEAD}${target}"
+  fi
+
+  local -a ssh_opts=(
+    -o "ConnectTimeout=${SSH_CONNECT_TIMEOUT}"
+    -o 'PasswordAuthentication=no'
+    -o 'StrictHostKeyChecking=accept-new'
+  )
+
+  ((VERBOSE==0)) || ssh_opts+=(-v)
+
+  log_info "Connecting to ${LOGIN_USERNAME}@${target}"
+
+  if ((${#ssh_args[@]})); then
+    # Execute command with timeout protection
+    # --kill-after=10: Force kill if still running 10s after timeout
+    timeout --kill-after=10 "$SSH_SESSION_TIMEOUT" \
+      ssh "${ssh_opts[@]}" "${LOGIN_USERNAME}"@"${target}" "${ssh_args[@]}"
+  else
+    # Interactive session (no timeout for user interaction)
+    ssh "${ssh_opts[@]}" "${LOGIN_USERNAME}"@"${target}"
+  fi
+}
+
+main() {
+  local -a args=()
+  local -a ssh_command=()
+  local -- action=scan
+
+  # Load configuration first
+  load_config
+
+  # Parse command line arguments
+  while (($#)); do
+    case $1 in
+      -h|--help)
+        show_help
+        return 0
+        ;;
+      -V|--version)
+        echo "$SCRIPT_NAME $VERSION"
+        return 0
+        ;;
+      -v|--verbose)
+        VERBOSE+=1
+        ;;
+      -q|--quiet)
+        VERBOSE=-1
+        ;;
+      -s|--short)
+        SHORT_DISPLAY=1
+        ;;
+      -p|--supershort)
+        SHORT_DISPLAY=1
+        SUPER_SHORT=1
+        ;;
+      -C|--no-color)
+        COLOR_OUTPUT=0
+        ;;
+      -n|--network)
+        require_arg "$@"; shift
+        if [[ "$1" =~ /24$ ]]; then
+          # CIDR /24 notation: extract first 3 octets as prefix
+          LOCALHOST_HEAD="${1%/24}"
+          LOCALHOST_HEAD="${LOCALHOST_HEAD%.*}."
+          LOCALHOST_START_IP=1
+          LOCALHOST_END_IP=254
+        else
+          LOCALHOST_HEAD="${1%.}."  # Ensure it ends with dot
+        fi
+        ;;
+      -b|--begin)
+        require_arg "$@"; shift
+        LOCALHOST_START_IP=$1
+        ;;
+      -f|--finish)
+        require_arg "$@"; shift
+        LOCALHOST_END_IP=$1
+        ;;
+      -u|--user)
+        require_arg "$@"; shift
+        LOGIN_USERNAME=$1
+        ;;
+      -t|--timeout)
+        require_arg "$@"; shift
+        SSH_CONNECT_TIMEOUT=$1
+        ;;
+      -T|--session-time)
+        require_arg "$@"; shift
+        SSH_SESSION_TIMEOUT=$1
+        ;;
+      -l|--list)
+        grep -v '^#!' "$CONFIG_FILE" 2>/dev/null || true
+        return 0
+        ;;
+      -e|--edit)
+        "${EDITOR:-nano}" "$CONFIG_FILE"
+        return 0
+        ;;
+      -6|--ipv6)
+        IPV6_SCAN=1
+        ;;
+      -I|--interface)
+        require_arg "$@"; shift
+        IPV6_INTERFACE=$1
+        IPV6_SCAN=1
+        ;;
+      -S|--save-config)
+        create_config_file
+        return 0
+        ;;
+      --)
+        shift
+        ssh_command=("$@")
+        break
+        ;;
+
+      # Handle combined short options (e.g., -vp becomes -v -p)
+      -[hVvqspCleSnbfutT6]?*) set -- "${1:0:2}" "-${1:2}" "${@:2}"
+        continue
+        ;;
+
+      -*)
+        log_error "Unknown option ${1@Q}"
+        show_help >&2
+        return 22
+        ;;
+      *)
+        args+=("$1")
+        ;;
+    esac
+    shift
+  done
+
+  # Determine action based on arguments
+  if ((${#args[@]})); then
+    # SSH connection mode: first arg is target, rest are SSH command
+    action=connect
+    local -- target="${args[0]}"
+    ssh_command+=("${args[@]:1}")
+  fi
+
+  case "$action" in
+    scan)
+      # Scan network for SSH hosts
+      local -a hosts
+      mapfile -t hosts < <(scan_hosts)  # Read scan results into array
+
+      log_debug "Found ${#hosts[@]} hosts"
+
+      if ((${#hosts[@]} == 0)); then
+        if ((IPV6_SCAN)); then
+          local -- warn_iface=${IPV6_INTERFACE:-$(detect_ipv6_interface 2>/dev/null || echo 'unknown')}
+          log_warn "No SSH hosts found via IPv6 on ${warn_iface}"
+        else
+          log_warn "No SSH hosts found in range ${LOCALHOST_HEAD}${LOCALHOST_START_IP}-${LOCALHOST_END_IP}"
+        fi
+        return 0
+      fi
+
+      format_output "${hosts[@]}"
+      ;;
+
+    connect)
+      ssh_connect "$target" "${ssh_command[@]}"
+      ;;
+
+    *)
+      log_error "Unknown action ${action@Q}"
+      return 1
+      ;;
+  esac
+}
+
+# Script entry point - pass all arguments to main
+[[ "${BASH_SOURCE[0]}" != "$0" ]] || main "$@"
+#fin

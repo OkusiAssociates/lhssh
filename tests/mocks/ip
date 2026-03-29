@@ -1,0 +1,17 @@
+#!/usr/bin/bash
+# Mock ip command for testing IPv6 interface detection
+# Responds to: ip -6 route show default
+set -euo pipefail
+
+declare -- iface="${MOCK_IPV6_INTERFACE:-enp12s0}"
+
+# Match: ip -6 route show default
+if [[ "${*}" == *"-6"*"route"*"show"*"default"* ]]; then
+  if [[ -n "$iface" ]]; then
+    echo "default via fe80::1 dev ${iface} proto ra metric 100 pref high"
+  fi
+  exit 0
+fi
+
+# All other ip invocations fall through to real ip
+exec /usr/sbin/ip "$@"

@@ -1,0 +1,12 @@
+fe80::3091:faff:feb2:1f51%enp12s0                  REACHABLE    link-local   
+fe80::e203:6bff:fe5b:d0c5%enp12s0                  REACHABLE    link-local   
+fe80::5482:efff:fed8:e50d%enp12s0                  STALE        link-local   
+fe80::f67d:d2a:686:7400%enp12s0                    REACHABLE    link-local   
+fe80::7624:9fff:fed2:2b4%enp12s0                   REACHABLE    link-local   [ROUTER]
+fe80::1e61:b4ff:fe54:85ac%enp12s0                  REACHABLE    link-local   [ROUTER]
+fe80::d27f:a0ff:fee3:6f2b%enp12s0                  REACHABLE    link-local   
+fe80::b8c9:90ff:fe72:7412%enp12s0                  REACHABLE    link-local   
+fd30:2fa7:1f64:10::1                               REACHABLE    global       [ROUTER]
+fe80::1e61:b4ff:feff:702c%enp12s0                  REACHABLE    link-local   [ROUTER]
+fe80::828a:bdff:fe1d:38b6%enp12s0                  STALE        link-local   
+fe80::1e61:b4ff:fe54:6818%enp12s0                  REACHABLE    link-local   [ROUTER]

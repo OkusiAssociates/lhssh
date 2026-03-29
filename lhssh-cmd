@@ -1,0 +1,342 @@
+#!/usr/bin/bash
+# lhssh-cmd - Execute commands on multiple SSH hosts
+# Batch command executor for lhssh
+set -euo pipefail
+shopt -s inherit_errexit
+
+#shellcheck disable=SC2155  # declare -r and $() can't be split
+declare -r SCRIPT_PATH=$(realpath -- "$0")
+declare -r SCRIPT_NAME=${SCRIPT_PATH##*/}
+declare -r SCRIPT_DIR=${SCRIPT_PATH%/*}
+declare -r VERSION=2.0.0
+
+# Configuration
+declare -i VERBOSE=0                  # -1=quiet, 0=normal, 1=verbose, 2=debug
+declare -i COLOR_OUTPUT=1             # Enable colored output (0=disable)
+declare -i PARALLEL=0
+declare -i MAX_PARALLEL=10
+declare -- LHSSH_CMD=lhssh
+declare -i IPV6_SCAN=0
+declare -- IPV6_INTERFACE=''
+
+# Color codes (readonly; COLOR_OUTPUT flag controls runtime output)
+if [[ -t 1 && -t 2 ]] && [[ -z "${NO_COLOR:-}" ]] && tput colors &>/dev/null; then
+  declare -r RED=$'\033[0;31m' GREEN=$'\033[0;32m' YELLOW=$'\033[0;33m' \
+      BLUE=$'\033[0;34m' NC=$'\033[0m'
+else
+  declare -r RED='' GREEN='' YELLOW='' BLUE='' NC=''
+  COLOR_OUTPUT=0
+fi
+
+log() {
+  local -- level=$1
+  shift
+  local -- message="$*"
+  local -- r='' g='' y='' b='' n=''
+  if ((COLOR_OUTPUT)); then
+    r=$RED g=$GREEN y=$YELLOW b=$BLUE n=$NC
+  fi
+
+  case $level in
+    ERROR)
+      >&2 echo -e "${r}[ERROR]${n} $message"
+      ;;
+    WARN)
+      >&2 echo -e "${y}[WARN]${n} $message"
+      ;;
+    INFO)
+      ((VERBOSE >= 1)) || return 0
+      >&2 echo -e "${b}[INFO]${n} $message"
+      ;;
+    DEBUG)
+      ((VERBOSE >= 2)) || return 0
+      >&2 echo -e "[DEBUG] $message"
+      ;;
+    *)
+      ((VERBOSE >= 0)) || return 0
+      echo "$message"
+      ;;
+  esac
+}
+
+log_error() { log ERROR "$@"; }
+log_warn() { log WARN "$@"; }
+log_info() { log INFO "$@"; }
+log_debug() { log DEBUG "$@"; }
+
+# Output helpers with distinct behavior (not aliases of log_*)
+msg() { ((VERBOSE >= 0)) || return 0; echo -e "$*"; }
+msg_success() {
+  ((VERBOSE >= 0)) || return 0
+  local -- g='' n=''
+  if ((COLOR_OUTPUT)); then g=$GREEN n=$NC; fi
+  >&2 echo -e "${g}[OK]${n} $*"
+}
+msg_line() {
+  local -- char="${1:--}"
+  local -i width=${2:-80}
+  ((VERBOSE >= 0)) || return 0
+  local -- line
+  printf -v line '%*s' "$width" ''
+  echo "${line// /$char}"
+}
+
+require_arg() { (($# > 1)) || { log_error "Option ${1@Q} requires an argument"; return 22; }; }
+
+error_msg() {
+  local -i exit_code=$1
+  case $exit_code in
+    0)   echo 'Success' ;;
+    1)   echo 'General error' ;;
+    2)   echo 'Usage error' ;;
+    3)   echo 'No such file or directory' ;;
+    8)   echo 'Required argument missing' ;;
+    9)   echo 'Value out of range' ;;
+    22)  echo 'Invalid argument' ;;
+    23)  echo 'Network error' ;;
+    24)  echo 'Operation timed out' ;;
+    25)  echo 'Host unreachable' ;;
+    126) echo 'Command cannot execute' ;;
+    127) echo 'Command not found' ;;
+    130) echo 'Interrupted by Ctrl+C' ;;
+    255) echo 'SSH connection failed' ;;
+    *)   echo "Unknown error (code: $exit_code)" ;;
+  esac
+}
+
+#shellcheck disable=SC2317  # called from trap, not directly
+cleanup() {
+  trap - SIGINT SIGTERM EXIT
+  local -i exit_code=${1:-$?}
+  # SSH already provides detailed error messages
+  if ((exit_code != 0 && exit_code != 255)); then
+    log_error "Exit: $(error_msg "$exit_code")"
+  fi
+  exit "$exit_code"
+}
+
+trap 'cleanup $?' SIGINT SIGTERM EXIT
+
+execute_on_host() {
+  local -- host=$1
+  shift
+  local -a command=("$@")
+  local -a lhssh_opts=()
+  if ((VERBOSE >= 1)); then
+    lhssh_opts+=(-v)
+  fi
+
+  local -- output=''
+  local -i exit_code=0
+  local -- g='' r='' n=''
+  if ((COLOR_OUTPUT)); then g=$GREEN r=$RED n=$NC; fi
+
+  # Let lhssh stderr flow through directly (already prefixed by lhssh)
+  if output=$("$LHSSH_CMD" "${lhssh_opts[@]}" "$host" -- "${command[@]}"); then
+    if [[ -n "$output" ]]; then
+      echo -e "${g}[$host]${n} $output"
+    elif ((VERBOSE >= 1)); then
+      echo -e "${g}[$host]${n} Command completed successfully"
+    fi
+  else
+    exit_code=$?
+    >&2 echo -e "${r}[$host]${n} Failed: $(error_msg "$exit_code")"
+  fi
+
+  return "$exit_code"
+}
+
+execute_on_all_hosts() {
+  local -a command=("$@")
+  local -a hosts=()
+
+  log_info 'Discovering SSH hosts...'
+
+  local -a lhssh_scan_opts=(-p)
+  ((IPV6_SCAN)) && lhssh_scan_opts+=(-6)
+  [[ -z "$IPV6_INTERFACE" ]] || lhssh_scan_opts+=(-I "$IPV6_INTERFACE")
+  mapfile -t hosts < <("$LHSSH_CMD" "${lhssh_scan_opts[@]}" || true)
+
+  if ((${#hosts[@]} == 0)); then
+    log_error 'No SSH hosts found'
+    return 1
+  fi
+
+  log_info "Found ${#hosts[@]} hosts: ${hosts[*]}"
+  msg_line "="
+
+  local -i total=${#hosts[@]}
+  local -i failed=0
+
+  if ((PARALLEL)); then
+    # Native job-slot pattern — no exports or bash -c needed
+    log_info "Executing command in parallel (max $MAX_PARALLEL simultaneous connections)"
+    local -i running=0
+    local -- host
+    for host in "${hosts[@]}"; do
+      execute_on_host "$host" "${command[@]}" &
+      running+=1
+      if ((running >= MAX_PARALLEL)); then
+        wait -n || failed+=1
+        running+=-1
+      fi
+    done
+    while ((running > 0)); do
+      wait -n || failed+=1
+      running+=-1
+    done
+  else
+    local -i i=1
+    local -- host
+    for host in "${hosts[@]}"; do
+      log_info "Processing host $i/$total: $host"
+      execute_on_host "$host" "${command[@]}" || failed+=1
+      i+=1
+    done
+  fi
+
+  msg_line '='
+  msg_success 'Execution complete'
+  msg "  Total hosts: $total"
+  msg "  Successful: $((total - failed))"
+  msg "  Failed: $failed"
+
+  ((failed == 0))
+}
+
+usage() {
+  cat <<USAGE
+$SCRIPT_NAME $VERSION - Execute commands on multiple SSH hosts
+
+USAGE:
+  $SCRIPT_NAME [OPTIONS] COMMAND...
+  $SCRIPT_NAME [OPTIONS] -- COMMAND...
+
+DESCRIPTION:
+  Execute the same command on all SSH-accessible hosts found by lhssh.
+
+OPTIONS:
+  -h, --help         Show this help message
+  -V, --version      Show version information
+  -v, --verbose      Enable verbose output (use -vv for debug)
+  -q, --quiet        Suppress non-essential output
+  -p, --parallel     Execute commands in parallel
+  -P, --max-parallel Set max parallel connections (default: $MAX_PARALLEL)
+  -6, --ipv6         Discover IPv6 hosts instead of IPv4
+  -I, --interface    Network interface for IPv6 scanning (default: auto)
+
+  Advanced Options:
+  --lhssh PATH       Path to lhssh command (default: $LHSSH_CMD)
+
+EXAMPLES:
+  # Check disk usage on all hosts
+  $SCRIPT_NAME df -h
+
+  # Update all hosts
+  $SCRIPT_NAME sudo apt update
+
+  # Run in parallel
+  $SCRIPT_NAME -p uptime
+
+  # Run on IPv6 hosts
+  $SCRIPT_NAME -6 uptime
+
+  # Complex command with pipes
+  $SCRIPT_NAME -- 'ps aux | grep nginx'
+
+NOTES:
+  - Commands are executed with the same user configured in lhssh
+  - Use quotes for commands with special characters
+  - Exit codes from failed hosts are reported but don't stop execution
+
+SEE ALSO:
+  lhssh - The underlying SSH scanner and connection tool
+USAGE
+}
+
+main() {
+  local -a command=()
+
+  if ! command -v "$LHSSH_CMD" >/dev/null 2>&1; then
+    if [[ -x "$SCRIPT_DIR"/lhssh ]]; then
+      LHSSH_CMD="$SCRIPT_DIR"/lhssh
+    else
+      log_error 'lhssh command not found. Please ensure lhssh is in your PATH.'
+      return 127
+    fi
+  fi
+
+  while (($#)); do
+    case "$1" in
+      -h|--help)
+        usage
+        msg_line '-'
+        "$LHSSH_CMD" --help || true
+        return 0
+        ;;
+      -V|--version)
+        echo "$SCRIPT_NAME $VERSION"
+        return 0
+        ;;
+      -v|--verbose)
+        VERBOSE+=1
+        ;;
+      -q|--quiet)
+        VERBOSE=-1
+        ;;
+      -p|--parallel)
+        PARALLEL=1
+        ;;
+      -P|--max-parallel)
+        require_arg "$@"; shift
+        MAX_PARALLEL=$1
+        ((MAX_PARALLEL >= 1)) || { log_error 'Max parallel must be >= 1'; return 9; }
+        ;;
+      -6|--ipv6)
+        IPV6_SCAN=1
+        ;;
+      -I|--interface)
+        require_arg "$@"; shift
+        IPV6_INTERFACE=$1
+        IPV6_SCAN=1
+        ;;
+      --lhssh)
+        require_arg "$@"; shift
+        LHSSH_CMD=$1
+        ;;
+      --)
+        shift
+        command=("$@")
+        break
+        ;;
+
+      # Handle combined short options (boolean flags only)
+      -[hVvqp6]?*) set -- "${1:0:2}" "-${1:2}" "${@:2}"
+        continue
+        ;;
+
+      -*)
+        log_error "Unknown option ${1@Q}"
+        >&2 usage
+        return 22
+        ;;
+      *)
+        command+=("$1")
+        ;;
+    esac
+    shift
+  done
+
+  if ((${#command[@]} == 0)); then
+    log_error 'No command specified'
+    >&2 usage
+    return 22
+  fi
+
+  log_info "Command to execute: ${command[*]}"
+
+  execute_on_all_hosts "${command[@]}"
+}
+
+[[ "${BASH_SOURCE[0]}" != "$0" ]] || main "$@"
+#fin

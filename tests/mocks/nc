@@ -1,0 +1,32 @@
+#!/usr/bin/bash
+# Mock nc (netcat) for testing
+# Responds to hosts listed in MOCK_SSH_HOSTS (space-separated IPs)
+# Usage: nc [-z] [-w timeout] host port
+set -euo pipefail
+
+declare -- host='' port=''
+while (($#)); do
+  case $1 in
+    -z|-w) [[ "$1" == "-w" ]] && shift ;; # -w takes an argument
+    -*) ;;
+    *)
+      if [[ -z "$host" ]]; then
+        host=$1
+      else
+        port=$1
+      fi
+      ;;
+  esac
+  shift
+done
+
+if [[ "$port" != "22" ]]; then
+  exit 1
+fi
+
+declare -- mock_hosts="${MOCK_SSH_HOSTS:-}"
+if [[ " $mock_hosts " == *" $host "* ]]; then
+  exit 0
+fi
+
+exit 1

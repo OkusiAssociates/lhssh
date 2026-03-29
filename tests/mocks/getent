@@ -1,0 +1,26 @@
+#!/usr/bin/bash
+# Mock getent for testing
+# Returns mock hostname data for known IPs
+set -euo pipefail
+
+if [[ "${1:-}" != "hosts" ]]; then
+  exit 2
+fi
+
+declare -- ip="${2:-}"
+declare -- mock_data="${MOCK_GETENT_DATA:-}"
+
+# Check if we have mock data for this IP (format: "ip=hostname ip2=hostname2")
+if [[ -n "$mock_data" ]]; then
+  local_entry=""
+  for entry in $mock_data; do
+    local_ip="${entry%%=*}"
+    local_name="${entry#*=}"
+    if [[ "$local_ip" == "$ip" ]]; then
+      echo "$ip $local_name"
+      exit 0
+    fi
+  done
+fi
+
+exit 2

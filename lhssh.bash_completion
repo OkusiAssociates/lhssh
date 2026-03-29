@@ -1,0 +1,112 @@
+#!/usr/bin/bash
+# Bash completion for lhssh and lhssh-cmd
+
+_lhssh() {
+  local cur prev opts
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+  # Long and short options
+  opts="-h --help -V --version -v --verbose -q --quiet -s --short -p --supershort
+        -C --no-color -n --network -b --begin -f --finish -u --user -t --timeout
+        -T --session-time -l --list -e --edit -S --save-config -6 --ipv6 -I --interface"
+
+  # Handle options that expect arguments
+  case $prev in
+    -n|--network)
+      # Network prefix or CIDR /24 completion
+      mapfile -t COMPREPLY < <(compgen -W "192.168.1. 192.168.0. 10.0.0. 172.16.0. 192.168.1.0/24 10.0.0.0/24" -- "$cur")
+      return 0
+      ;;
+    -b|--begin|-f|--finish)
+      # IP range numbers
+      mapfile -t COMPREPLY < <(compgen -W "1 10 50 100 200 254" -- "$cur")
+      return 0
+      ;;
+    -u|--user)
+      # Common usernames
+      mapfile -t COMPREPLY < <(compgen -W "root admin user $USER" -- "$cur")
+      return 0
+      ;;
+    -t|--timeout)
+      # Timeout values in seconds
+      mapfile -t COMPREPLY < <(compgen -W "5 10 15 30 60" -- "$cur")
+      return 0
+      ;;
+    -T|--session-time)
+      # Session timeout values in seconds
+      mapfile -t COMPREPLY < <(compgen -W "300 600 900 1800 3600" -- "$cur")
+      return 0
+      ;;
+    -I|--interface)
+      # Complete with network interface names
+      mapfile -t COMPREPLY < <(compgen -W "$(ls /sys/class/net 2>/dev/null)" -- "$cur")
+      return 0
+      ;;
+  esac
+
+  # If current word starts with dash, complete options
+  if [[ $cur == -* ]]; then
+    mapfile -t COMPREPLY < <(compgen -W "$opts" -- "$cur")
+    return 0
+  fi
+
+  # If no dash and we have a config file, try to complete with known hosts
+  if [[ -f ~/.lhssh.conf ]]; then
+    # Source the config to get network settings
+    local LOCALHOST_HEAD LOCALHOST_START_IP LOCALHOST_END_IP
+    # shellcheck source=/dev/null
+    source ~/.lhssh.conf 2>/dev/null || true
+
+    # Generate potential IP completions (last octet only)
+    if [[ -n "$LOCALHOST_HEAD" && -n "$LOCALHOST_START_IP" && -n "$LOCALHOST_END_IP" ]]; then
+      local ips=()
+      for ((i=LOCALHOST_START_IP; i<=LOCALHOST_END_IP; i++)); do
+        ips+=("$i")
+      done
+      mapfile -t COMPREPLY < <(compgen -W "${ips[*]}" -- "$cur")
+    fi
+  fi
+
+  # Fall back to numeric completion for IP last octets
+  if [[ ${#COMPREPLY[@]} -eq 0 && $cur =~ ^[0-9]*$ ]]; then
+    local nums=()
+    for ((i=1; i<=254; i++)); do
+      if [[ $i =~ ^$cur ]]; then
+        nums+=("$i")
+      fi
+    done
+    COMPREPLY=("${nums[@]}")
+  fi
+}
+
+_lhssh_cmd() {
+  local cur prev opts
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+  opts="-h --help -V --version -v --verbose -q --quiet -p --parallel
+        -P --max-parallel --lhssh"
+
+  case $prev in
+    -P|--max-parallel)
+      mapfile -t COMPREPLY < <(compgen -W "5 10 20 50" -- "$cur")
+      return 0
+      ;;
+    --lhssh)
+      # Complete with file paths
+      mapfile -t COMPREPLY < <(compgen -f -- "$cur")
+      return 0
+      ;;
+  esac
+
+  if [[ $cur == -* ]]; then
+    mapfile -t COMPREPLY < <(compgen -W "$opts" -- "$cur")
+    return 0
+  fi
+}
+
+complete -F _lhssh lhssh
+complete -F _lhssh_cmd lhssh-cmd
