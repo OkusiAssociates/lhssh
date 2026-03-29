@@ -15,7 +15,8 @@ MOCK_DIR="${BATS_TEST_DIRNAME}/mocks"
 setup_test_env() {
   TEST_HOME=$(mktemp -d)
   export HOME="$TEST_HOME"
-  export CONFIG_FILE="$TEST_HOME/.lhssh.conf"
+  export XDG_CONFIG_HOME="$TEST_HOME/.config"
+  export CONFIG_FILE="$TEST_HOME/.config/lhssh/lhssh.conf"
   # Ensure no color in tests for predictable output
   export NO_COLOR=1
   # Disable verbose by default
@@ -85,6 +86,7 @@ EOF
 # Write a test config file
 # Usage: write_test_config [key=value ...]
 write_test_config() {
+  mkdir -p "${CONFIG_FILE%/*}"
   cat > "$CONFIG_FILE" <<'CONF'
 LOCALHOST_HEAD='192.168.1.'
 LOCALHOST_START_IP=50

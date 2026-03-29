@@ -25,10 +25,10 @@ declare -r SCRIPT_PATH=$(realpath -- "$0")
 declare -r SCRIPT_DIR=${SCRIPT_PATH%/*}
 declare -r SCRIPT_NAME=${SCRIPT_PATH##*/}
 
-declare -r CONFIG_FILE="$HOME"/."$SCRIPT_NAME".conf
+declare -- CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}"/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
 
 # Default configuration variables
-# These can be overridden in ~/.lhssh.conf
+# Overridden by /etc/lhssh.conf (system) then user config (see load_config)
 declare -- LOCALHOST_HEAD='192.168.1.'      # Network prefix (must end with dot)
 declare -i LOCALHOST_START_IP=50            # First IP in scan range (last octet)
 declare -i LOCALHOST_END_IP=230             # Last IP in scan range (last octet)
@@ -41,7 +41,7 @@ declare -i VERBOSE=0                        # Verbosity level (0=normal, 1=info,
 declare -i COLOR_OUTPUT=1                   # Enable colored output (0=disable)
 declare -i PARALLEL_SCAN=1                  # Use parallel scanning (0=sequential)
 declare -i IPV6_SCAN=0                      # Scan IPv6 instead of IPv4
-declare -- IPV6_INTERFACE=''                 # IPv6 interface (empty=auto-detect)
+declare -- IPV6_INTERFACE=''                # IPv6 interface (empty=auto-detect)
 
 # Color codes (readonly; --no-color controls output via COLOR_OUTPUT flag)
 if [[ -t 1 && -t 2 ]] && [[ -z "${NO_COLOR:-}" ]] && tput colors &>/dev/null; then
@@ -202,6 +202,7 @@ HELP
 }
 
 create_config_file() {
+  mkdir -p "${CONFIG_FILE%/*}"
   cat > "$CONFIG_FILE" <<CONFIG
 #!/bin/bash
 # $SCRIPT_NAME: Display ssh accessible localhosts / Run commands on localhosts
@@ -227,21 +228,45 @@ COLOR_OUTPUT=$COLOR_OUTPUT
 PARALLEL_SCAN=$PARALLEL_SCAN
 # IPv6 network interface for scanning (empty=auto-detect from default route)
 IPV6_INTERFACE='$IPV6_INTERFACE'
+#fin
 CONFIG
   chmod 600 "$CONFIG_FILE"
   log_info "Created configuration file ${CONFIG_FILE@Q}"
 }
 
 load_config() {
-  if [[ -f "$CONFIG_FILE" ]]; then
+  # System-wide defaults first
+  if [[ -f /etc/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf ]]; then
     # shellcheck source=/dev/null
-    source "$CONFIG_FILE" || {
-      log_error "Failed to load config file ${CONFIG_FILE@Q}"
-      return 1
-    }
-  else
-    create_config_file
+    source /etc/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
+  elif [[ -f /etc/"$SCRIPT_NAME".conf ]]; then
+    # shellcheck source=/dev/null
+    source /etc/"$SCRIPT_NAME".conf
   fi
+
+  # User config overrides (first found wins)
+  local -- conf_file
+  local -a search_paths=(
+    "$HOME"/."$SCRIPT_NAME".conf
+    "${XDG_CONFIG_HOME:-$HOME/.config}"/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
+    /usr/local/etc/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
+    /usr/share/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
+    /usr/lib/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
+  )
+  for conf_file in "${search_paths[@]}"; do
+    if [[ -f "$conf_file" ]]; then
+      # shellcheck source=/dev/null
+      source "$conf_file" || {
+        log_error "Failed to load config file ${conf_file@Q}"
+        return 1
+      }
+      CONFIG_FILE=$conf_file
+      return 0
+    fi
+  done
+
+  # No config found — create default
+  create_config_file
 }
 
 # Generate IP list for a scan range to stdout
@@ -266,7 +291,8 @@ detect_ipv6_interface() {
 # Discover IPv6 neighbors via all-nodes multicast ping
 discover_ipv6_neighbors() {
   local -- iface=$1
-  ping6 -c 2 -W 300 "ff02::1%${iface}" 2>/dev/null \
+  local -i timeout_ms=$((SSH_CONNECT_TIMEOUT * 1000))
+  ping6 -c 2 -W "$timeout_ms" "ff02::1%${iface}" 2>/dev/null \
     | awk '/from /{print $4}' \
     | sed 's/:$//' \
     | sort -u
