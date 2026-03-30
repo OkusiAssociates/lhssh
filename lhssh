@@ -35,6 +35,7 @@ declare -i LOCALHOST_END_IP=230             # Last IP in scan range (last octet)
 declare -- LOGIN_USERNAME=${USER:-root}     # SSH login username
 declare -i SHORT_DISPLAY=0                  # Show IP addresses only (no hostnames)
 declare -i SUPER_SHORT=0                    # Show last octet only
+declare -i SHOW_HOSTNAME=0                  # Append hostname to short/supershort output
 declare -i SSH_CONNECT_TIMEOUT=10           # SSH connection timeout (seconds)
 declare -i SSH_SESSION_TIMEOUT=600          # SSH session timeout (seconds)
 declare -i VERBOSE=0                        # Verbosity level (0=normal, 1=info, 2=debug)
@@ -147,6 +148,7 @@ OPTIONS:
   Display Options:
   -s, --short             Show IP addresses only
   -p, --supershort        Show only last octet of IP addresses
+  -H, --with-hostname     Add hostname to -s/-p output (tab-separated)
   -C, --no-color          Disable colored output
 
   Network Options:
@@ -206,27 +208,27 @@ create_config_file() {
   cat > "$CONFIG_FILE" <<CONFIG
 #!/bin/bash
 # $SCRIPT_NAME: Display ssh accessible localhosts / Run commands on localhosts
-# localhost header (e.g. 192.168.1.); omit last number; end with dot
+# [IPv4] localhost header (e.g. 192.168.1.); omit last number; end with dot
 LOCALHOST_HEAD='$LOCALHOST_HEAD'
-# start scanning from this IP
+# [IPv4] start scanning from this IP
 LOCALHOST_START_IP=$LOCALHOST_START_IP
-# stop scanning at this IP
+# [IPv4] stop scanning at this IP
 LOCALHOST_END_IP=$LOCALHOST_END_IP
-# ssh login username
+# [shared] ssh login username
 LOGIN_USERNAME='$LOGIN_USERNAME'
-# short display of IPs only
+# [shared] short display of IPs only
 SHORT_DISPLAY=$SHORT_DISPLAY
-# supershort display (last number of IP only)
+# [shared] supershort display (last octet for IPv4; full address for IPv6)
 SUPER_SHORT=$SUPER_SHORT
-# ssh connect timeout in seconds
+# [shared] connection timeout in seconds (also controls IPv6 ping timeout)
 SSH_CONNECT_TIMEOUT=$SSH_CONNECT_TIMEOUT
-# ssh session timeout in seconds
+# [shared] ssh session timeout in seconds
 SSH_SESSION_TIMEOUT=$SSH_SESSION_TIMEOUT
-# enable colored output
+# [shared] enable colored output
 COLOR_OUTPUT=$COLOR_OUTPUT
-# use parallel scanning (faster)
+# [IPv4] use parallel scanning (faster)
 PARALLEL_SCAN=$PARALLEL_SCAN
-# IPv6 network interface for scanning (empty=auto-detect from default route)
+# [IPv6] network interface for scanning (empty=auto-detect from default route)
 IPV6_INTERFACE='$IPV6_INTERFACE'
 #fin
 CONFIG
@@ -382,17 +384,22 @@ format_output() {
   fi
   local -- host
 
-  if ((SUPER_SHORT)); then
-    if ((is_ipv6)); then
-      # No meaningful short form for IPv6; output full address
-      printf '%s\n' "${hosts[@]}"
-    else
-      for host in "${hosts[@]}"; do
-        echo "${host##*.}"
-      done
-    fi
-  elif ((SHORT_DISPLAY)); then
-    printf '%s\n' "${hosts[@]}"
+  if ((SUPER_SHORT || SHORT_DISPLAY)); then
+    local -- label
+    for host in "${hosts[@]}"; do
+      if ((SUPER_SHORT && !is_ipv6)); then
+        label="${host##*.}"
+      else
+        label="$host"
+      fi
+      if ((SHOW_HOSTNAME)); then
+        local -- hn
+        hn=$(getent hosts "$host" 2>/dev/null | awk '{print $2}' || true)
+        printf '%s\t%s\n' "$label" "$hn"
+      else
+        echo "$label"
+      fi
+    done
   else
     echo 'SSH Hosts Found:'
     echo '================'
@@ -481,6 +488,9 @@ main() {
         SHORT_DISPLAY=1
         SUPER_SHORT=1
         ;;
+      -H|--with-hostname)
+        SHOW_HOSTNAME=1
+        ;;
       -C|--no-color)
         COLOR_OUTPUT=0
         ;;
@@ -543,7 +553,7 @@ main() {
         ;;
 
       # Handle combined short options (e.g., -vp becomes -v -p)
-      -[hVvqspCleSnbfutT6]?*) set -- "${1:0:2}" "-${1:2}" "${@:2}"
+      -[hVvqspHCleSnbfutT6]?*) set -- "${1:0:2}" "-${1:2}" "${@:2}"
         continue
         ;;
 

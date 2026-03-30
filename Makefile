@@ -3,6 +3,7 @@
 
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
+MANDIR  ?= $(PREFIX)/share/man/man1
 COMPDIR ?= /etc/bash_completion.d
 CONFDIR ?= /etc/lhssh
 DESTDIR ?=
@@ -17,6 +18,8 @@ install:
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 755 lhssh $(DESTDIR)$(BINDIR)/lhssh
 	install -m 755 lhssh-cmd $(DESTDIR)$(BINDIR)/lhssh-cmd
+	install -d $(DESTDIR)$(MANDIR)
+	install -m 644 lhssh.1 $(DESTDIR)$(MANDIR)/lhssh.1
 	@if [ -d $(DESTDIR)$(COMPDIR) ]; then \
 	  install -m 644 lhssh.bash_completion $(DESTDIR)$(COMPDIR)/lhssh; \
 	fi
@@ -32,6 +35,7 @@ install:
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/lhssh
 	rm -f $(DESTDIR)$(BINDIR)/lhssh-cmd
+	rm -f $(DESTDIR)$(MANDIR)/lhssh.1
 	rm -f $(DESTDIR)$(COMPDIR)/lhssh
 	@echo 'Note: $(CONFDIR)/lhssh.conf preserved (remove manually if desired)'
 

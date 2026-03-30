@@ -1,26 +1,26 @@
 #!/usr/bin/bash
 # lhssh: System-wide default configuration
 # User config (~/.config/lhssh/lhssh.conf) overrides these values.
-# localhost header (e.g. 192.168.1.); omit last number; end with dot
+# [IPv4] localhost header (e.g. 192.168.1.); omit last number; end with dot
 LOCALHOST_HEAD='192.168.1.'
-# start scanning from this IP
+# [IPv4] start scanning from this IP
 LOCALHOST_START_IP=0
-# stop scanning at this IP
+# [IPv4] stop scanning at this IP
 LOCALHOST_END_IP=255
-# ssh login username
+# [shared] ssh login username
 LOGIN_USERNAME='root'
-# short display of IPs only
+# [shared] short display of IPs only
 SHORT_DISPLAY=0
-# supershort display (last number of IP only)
+# [shared] supershort display (last octet for IPv4; full address for IPv6)
 SUPER_SHORT=0
-# ssh connect timeout in seconds
+# [shared] connection timeout in seconds (also controls IPv6 ping timeout)
 SSH_CONNECT_TIMEOUT=10
-# ssh session timeout in seconds
+# [shared] ssh session timeout in seconds
 SSH_SESSION_TIMEOUT=600
-# enable colored output
+# [shared] enable colored output
 COLOR_OUTPUT=0
-# use parallel scanning (faster)
+# [IPv4] use parallel scanning (faster)
 PARALLEL_SCAN=1
-# IPv6 network interface for scanning (empty=auto-detect from default route)
+# [IPv6] network interface for scanning (empty=auto-detect from default route)
 IPV6_INTERFACE=''
 #fin

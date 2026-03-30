@@ -1,0 +1,282 @@
+.TH LHSSH 1 "March 2026" "lhssh 2.0.0" "User Commands"
+.SH NAME
+lhssh \- local host SSH scanner and connection manager
+.SH SYNOPSIS
+.B lhssh
+[\fIOPTIONS\fR]
+.br
+.B lhssh
+[\fIOPTIONS\fR] \fITARGET\fR [\fICOMMAND\fR...]
+.br
+.B lhssh
+.B \-6
+[\fIOPTIONS\fR]
+.br
+.B lhssh
+.B \-h
+|
+.B \-V
+.SH DESCRIPTION
+.B lhssh
+is a dependency-free bash utility for scanning local networks for SSH-enabled hosts and managing connections.
+It supports IPv4 range scanning, IPv6 link-local discovery via multicast ping, and direct SSH connections using short notation.
+.PP
+.B lhssh
+operates in two modes:
+.TP
+.B Scan mode (default)
+Discovers SSH hosts on the local network.
+IPv4 mode iterates an IP range and probes with
+.BR ssh-keyscan (1)
+or
+.BR nc (1).
+IPv6 mode sends an ICMPv6 all-nodes multicast ping and filters responders through
+.BR ssh-keyscan (1).
+.TP
+.B Connect mode
+Establishes an SSH connection to a specified target.
+TARGET can be a short octet (e.g., \fB152\fR expands to \fB192.168.1.152\fR),
+a full IPv4 address, or an IPv6 address with optional zone ID
+(e.g., \fBfe80::1%enp12s0\fR).
+If COMMAND is given, it is executed on the remote host with timeout protection;
+otherwise an interactive session is opened.
+.PP
+The companion script
+.B lhssh\-cmd
+wraps
+.B lhssh
+to execute commands across all discovered hosts, with optional parallel execution.
+.SH OPTIONS
+.SS General Options
+.TP
+.BR \-h ", " \-\-help
+Show help message and exit.
+.TP
+.BR \-V ", " \-\-version
+Show version information and exit.
+.TP
+.BR \-v ", " \-\-verbose
+Enable verbose output. Use \fB\-vv\fR for debug output.
+.TP
+.BR \-q ", " \-\-quiet
+Suppress all non-essential output.
+.SS Display Options
+.TP
+.BR \-s ", " \-\-short
+Show IP addresses only (no header or hostnames).
+.TP
+.BR \-p ", " \-\-supershort
+Show only the last octet of IPv4 addresses. For IPv6, outputs the full address.
+.TP
+.BR \-H ", " \-\-with\-hostname
+Add hostname to \fB\-s\fR/\fB\-p\fR output as a tab-separated second column.
+.TP
+.BR \-C ", " \-\-no\-color
+Disable colored output.
+.SS Network Options
+.TP
+.BR \-n ", " \-\-network " \fIPREFIX\fR"
+Set the network prefix for IPv4 scanning (default: \fB192.168.1.\fR).
+Supports CIDR /24 notation (e.g., \fB10.99.10.0/24\fR), which sets the prefix and
+scans the full 1\-254 range.
+.TP
+.BR \-b ", " \-\-begin " \fIIP\fR"
+Start IP for scanning, last octet (default: \fB50\fR).
+.TP
+.BR \-f ", " \-\-finish " \fIIP\fR"
+End IP for scanning, last octet (default: \fB230\fR).
+.TP
+.BR \-6 ", " \-\-ipv6
+Scan IPv6 link-local neighbors instead of IPv4.
+Uses multicast ping (\fBff02::1\fR) for discovery.
+.TP
+.BR \-I ", " \-\-interface " \fIIFACE\fR"
+Network interface for IPv6 scanning (default: auto-detected from default route).
+Implies \fB\-6\fR.
+.SS SSH Options
+.TP
+.BR \-u ", " \-\-user " \fIUSERNAME\fR"
+SSH username (default: current user).
+.TP
+.BR \-t ", " \-\-timeout " \fISECS\fR"
+Connection timeout in seconds (default: \fB10\fR).
+In IPv6 scan mode, also controls the multicast ping timeout (converted to milliseconds).
+.TP
+.BR \-T ", " \-\-session\-time " \fISECS\fR"
+Session timeout for remote command execution (default: \fB600\fR).
+Does not apply to interactive sessions.
+.SS Configuration Options
+.TP
+.BR \-l ", " \-\-list
+Show current configuration.
+.TP
+.BR \-e ", " \-\-edit
+Open configuration file in \fB$EDITOR\fR (default: \fBnano\fR).
+.TP
+.BR \-S ", " \-\-save\-config
+Save current options to configuration file.
+.SH EXAMPLES
+Scan the default network for SSH hosts:
+.RS
+.nf
+.B lhssh
+.fi
+.RE
+.PP
+Connect to host .152 using short notation:
+.RS
+.nf
+.B lhssh 152
+.fi
+.RE
+.PP
+Run a command on a remote host:
+.RS
+.nf
+.B lhssh 152 uptime
+.fi
+.RE
+.PP
+Scan a different network range:
+.RS
+.nf
+.B lhssh \-n 10.0.0. \-b 1 \-f 50
+.fi
+.RE
+.PP
+Scan a /24 network using CIDR notation:
+.RS
+.nf
+.B lhssh \-n 10.99.10.0/24
+.fi
+.RE
+.PP
+Scan IPv6 link-local neighbors:
+.RS
+.nf
+.B lhssh \-6
+.fi
+.RE
+.PP
+Scan IPv6 on a specific interface:
+.RS
+.nf
+.B lhssh \-6 \-I enp12s0
+.fi
+.RE
+.PP
+Connect to an IPv6 host:
+.RS
+.nf
+.B lhssh fe80::1%enp12s0 hostname
+.fi
+.RE
+.PP
+List IPs with hostnames (tab-separated, for scripting):
+.RS
+.nf
+.B lhssh \-sH
+.fi
+.RE
+.PP
+Execute a command on all discovered hosts:
+.RS
+.nf
+for ip in $(lhssh \-p); do
+    lhssh $ip "hostname \-f"
+done
+.fi
+.RE
+.PP
+Run a command on all hosts in parallel using lhssh\-cmd:
+.RS
+.nf
+.B lhssh\-cmd \-p "df \-h"
+.fi
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+General error.
+.TP
+.B 22
+Invalid argument (bad option, invalid IP octet, invalid IPv6 address).
+.TP
+.B 24
+Operation timed out.
+.TP
+.B 25
+Host unreachable.
+.TP
+.B 130
+Interrupted by Ctrl+C.
+.TP
+.B 255
+SSH connection failed.
+.SH FILES
+.TP
+.I /etc/lhssh/lhssh.conf
+System-wide default configuration. Loaded first; user config overrides.
+.TP
+.I ~/.lhssh.conf
+Legacy user configuration (searched first).
+.TP
+.I ~/.config/lhssh/lhssh.conf
+XDG-compliant user configuration. Auto-created on first run if no config exists.
+.TP
+.I /etc/bash_completion.d/lhssh
+Bash completion for lhssh and lhssh\-cmd.
+.SH ENVIRONMENT
+.TP
+.B NO_COLOR
+If set, disables colored output. See \fIhttps://no\-color.org\fR.
+.TP
+.B EDITOR
+Editor used by \fB\-e\fR to edit the configuration file.
+.TP
+.B USER
+Default SSH username when \fB\-u\fR is not specified.
+.TP
+.B XDG_CONFIG_HOME
+Base directory for user configuration (default: \fI~/.config\fR).
+.SH SECURITY
+.IP \(bu 2
+Key-based authentication only (\fBPasswordAuthentication=no\fR).
+.IP \(bu 2
+SSH host key checking set to \fBaccept\-new\fR (auto-accepts new host keys, rejects changed keys).
+.IP \(bu 2
+Configuration files created with mode 600.
+.IP \(bu 2
+IPv6 address input validated against injection characters.
+.SH BUGS
+Report bugs at:
+.br
+.I https://github.com/OkusiAssociates/lhssh/issues
+.SH SEE ALSO
+.BR ssh (1),
+.BR ssh-keyscan (1),
+.BR nc (1),
+.BR ping6 (8),
+.BR getent (1)
+.PP
+.B lhssh\-cmd
+\- batch command executor (installed alongside lhssh).
+.PP
+Project homepage:
+.br
+.I https://github.com/OkusiAssociates/lhssh
+.SH AUTHOR
+OKUSI Project
+.RI ( https://okusi.id )
+.SH COPYRIGHT
+Copyright \(co 2026 Okusi Associates.
+.br
+License GPLv3+: GNU GPL version 3 or later.
+.br
+.I https://gnu.org/licenses/gpl.html
+.PP
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.

@@ -65,6 +65,7 @@ TARGET can be a short octet (`152`), full IPv4 (`192.168.1.152`), or IPv6 addres
 | **Display** | |
 | `-s, --short` | Show IP addresses only |
 | `-p, --supershort` | Show last octet only (IPv4) or full address (IPv6) |
+| `-H, --with-hostname` | Add hostname to `-s`/`-p` output (tab-separated) |
 | `-C, --no-color` | Disable colored output |
 | **Network** | |
 | `-n, --network PREFIX` | Set network prefix or CIDR /24 (default: `192.168.1.`) |
@@ -106,6 +107,10 @@ lhssh fe80::1%enp12s0 hostname
 for ip in $(lhssh -p); do
     lhssh $ip "hostname -f"
 done
+
+# Short output with hostnames (tab-separated)
+lhssh -sH     # 192.168.1.50\thostname
+lhssh -pH     # 50\thostname
 
 # Combine short options
 lhssh -vp     # Verbose + supershort
