@@ -9,8 +9,10 @@ _lhssh() {
 
   # Long and short options
   opts="-h --help -V --version -v --verbose -q --quiet -s --short -p --supershort
-        -C --no-color -n --network -b --begin -f --finish -u --user -t --timeout
-        -T --session-time -l --list -e --edit -S --save-config -6 --ipv6 -I --interface"
+        -H --with-hostname -C --no-color -n --network -b --begin -f --finish
+        -u --user -t --timeout -T --session-time -K --kill -U --unkill
+        -L --list-killed -l --list -e --edit -S --save-config -6 --ipv6
+        -I --interface"
 
   # Handle options that expect arguments
   case $prev in

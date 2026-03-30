@@ -163,6 +163,11 @@ OPTIONS:
   -t, --timeout SECS      Connection timeout (default: $SSH_CONNECT_TIMEOUT)
   -T, --session-time SECS Session timeout (default: $SSH_SESSION_TIMEOUT)
 
+  Host Blocking (temporary — cleared on reboot):
+  -K, --kill IP           Block an IP address via nft (requires sudo)
+  -U, --unkill IP         Unblock a previously blocked IP address
+  -L, --list-killed       Show currently blocked IP addresses
+
   Configuration:
   -l, --list              Show current configuration
   -e, --edit              Edit configuration file
@@ -416,6 +421,97 @@ format_output() {
   fi
 }
 
+declare -r NFT_TABLE='lhssh'
+declare -r NFT_CHAIN='blocked'
+
+# Validate an IP address (IPv4 dotted or IPv6 with optional zone ID)
+validate_ip() {
+  local -- ip=$1
+  if [[ "$ip" =~ : ]]; then
+    [[ "$ip" =~ ^[a-fA-F0-9:.]+(%[a-zA-Z0-9._-]+)?$ ]] || {
+      log_error "Invalid IPv6 address ${ip@Q}"; return 22
+    }
+  elif [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    :
+  else
+    log_error "Invalid IP address ${ip@Q} (use full IP, not short octet)"
+    return 22
+  fi
+}
+
+# Ensure the lhssh nft table and chain exist
+nft_ensure_chain() {
+  sudo nft list table inet "$NFT_TABLE" &>/dev/null && return 0
+  log_info "Creating nft table inet ${NFT_TABLE}"
+  sudo nft add table inet "$NFT_TABLE" || { log_error 'Failed to create nft table (need sudo?)'; return 1; }
+  sudo nft add chain inet "$NFT_TABLE" "$NFT_CHAIN" '{ type filter hook forward priority 0; policy accept; }'
+}
+
+# Block an IP via nft (temporary — cleared on reboot)
+kill_host() {
+  local -- ip=$1
+  validate_ip "$ip" || return $?
+  nft_ensure_chain || return $?
+
+  # Check if already blocked
+  if sudo nft list chain inet "$NFT_TABLE" "$NFT_CHAIN" 2>/dev/null | grep -q "saddr $ip "; then
+    log_warn "Host ${ip} is already blocked"
+    return 0
+  fi
+
+  if sudo nft add rule inet "$NFT_TABLE" "$NFT_CHAIN" ip saddr "$ip" drop; then
+    log_info "Blocked ${ip} (temporary — cleared on reboot)"
+  else
+    log_error "Failed to block ${ip}"; return 1
+  fi
+}
+
+# Unblock an IP
+unkill_host() {
+  local -- ip=$1
+  validate_ip "$ip" || return $?
+
+  if ! sudo nft list table inet "$NFT_TABLE" &>/dev/null; then
+    log_warn "No blocked hosts (nft table ${NFT_TABLE} does not exist)"
+    return 0
+  fi
+
+  # Find and delete the matching rule handle
+  local -- handle
+  handle=$(sudo nft -a list chain inet "$NFT_TABLE" "$NFT_CHAIN" 2>/dev/null \
+    | grep "saddr $ip " | awk '{print $NF}')
+
+  if [[ -z "$handle" ]]; then
+    log_warn "Host ${ip} is not blocked"
+    return 0
+  fi
+
+  if sudo nft delete rule inet "$NFT_TABLE" "$NFT_CHAIN" handle "$handle"; then
+    log_info "Unblocked ${ip}"
+  else
+    log_error "Failed to unblock ${ip}"; return 1
+  fi
+}
+
+# List currently blocked IPs
+list_killed() {
+  if ! sudo nft list table inet "$NFT_TABLE" &>/dev/null; then
+    echo "No blocked hosts"
+    return 0
+  fi
+
+  local -a blocked=()
+  mapfile -t blocked < <(sudo nft list chain inet "$NFT_TABLE" "$NFT_CHAIN" 2>/dev/null \
+    | grep 'saddr .* drop' | awk '{for(i=1;i<=NF;i++) if($i=="saddr") print $(i+1)}')
+
+  if ((${#blocked[@]} == 0)); then
+    echo "No blocked hosts"
+  else
+    echo "Blocked hosts (temporary — cleared on reboot):"
+    printf '  %s\n' "${blocked[@]}"
+  fi
+}
+
 ssh_connect() {
   local -- target=$1
   shift
@@ -532,6 +628,20 @@ main() {
         ;;
       -e|--edit)
         "${EDITOR:-nano}" "$CONFIG_FILE"
+        return 0
+        ;;
+      -K|--kill)
+        require_arg "$@"; shift
+        kill_host "$1"
+        return $?
+        ;;
+      -U|--unkill)
+        require_arg "$@"; shift
+        unkill_host "$1"
+        return $?
+        ;;
+      -L|--list-killed)
+        list_killed
         return 0
         ;;
       -6|--ipv6)

@@ -77,6 +77,10 @@ TARGET can be a short octet (`152`), full IPv4 (`192.168.1.152`), or IPv6 addres
 | `-u, --user USERNAME` | SSH username (default: current user) |
 | `-t, --timeout SECS` | Connection timeout in seconds (default: `10`) |
 | `-T, --session-time SECS` | Session timeout in seconds (default: `600`) |
+| **Host Blocking** | |
+| `-K, --kill IP` | Block an IP via nft (temporary, requires sudo) |
+| `-U, --unkill IP` | Unblock a previously blocked IP |
+| `-L, --list-killed` | Show currently blocked IPs |
 | **Configuration** | |
 | `-l, --list` | Show current configuration |
 | `-e, --edit` | Edit configuration file |
@@ -111,6 +115,11 @@ done
 # Short output with hostnames (tab-separated)
 lhssh -sH     # 192.168.1.50\thostname
 lhssh -pH     # 50\thostname
+
+# Block a rogue device (temporary — cleared on reboot)
+lhssh -K 192.168.1.99
+lhssh -L                 # List blocked IPs
+lhssh -U 192.168.1.99    # Unblock
 
 # Combine short options
 lhssh -vp     # Verbose + supershort

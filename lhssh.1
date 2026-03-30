@@ -105,6 +105,21 @@ In IPv6 scan mode, also controls the multicast ping timeout (converted to millis
 .BR \-T ", " \-\-session\-time " \fISECS\fR"
 Session timeout for remote command execution (default: \fB600\fR).
 Does not apply to interactive sessions.
+.SS Host Blocking Options
+These options use
+.BR nft (8)
+to temporarily block hosts at the firewall level.
+Rules are stored in a dedicated nft table (\fBinet lhssh\fR) and are
+cleared on reboot. Requires sudo privileges.
+.TP
+.BR \-K ", " \-\-kill " \fIIP\fR"
+Block an IP address. Requires a full IPv4 or IPv6 address (not short octets).
+.TP
+.BR \-U ", " \-\-unkill " \fIIP\fR"
+Unblock a previously blocked IP address.
+.TP
+.BR \-L ", " \-\-list\-killed
+Show all currently blocked IP addresses.
 .SS Configuration Options
 .TP
 .BR \-l ", " \-\-list
@@ -185,6 +200,27 @@ Execute a command on all discovered hosts:
 for ip in $(lhssh \-p); do
     lhssh $ip "hostname \-f"
 done
+.fi
+.RE
+.PP
+Block a rogue device (temporary \(em cleared on reboot):
+.RS
+.nf
+.B lhssh \-K 192.168.1.99
+.fi
+.RE
+.PP
+List currently blocked hosts:
+.RS
+.nf
+.B lhssh \-L
+.fi
+.RE
+.PP
+Unblock a host:
+.RS
+.nf
+.B lhssh \-U 192.168.1.99
 .fi
 .RE
 .PP
