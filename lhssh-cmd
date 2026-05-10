@@ -72,14 +72,6 @@ msg_success() {
   if ((COLOR_OUTPUT)); then g=$GREEN n=$NC; fi
   >&2 echo -e "${g}[OK]${n} $*"
 }
-msg_line() {
-  local -- char="${1:--}"
-  local -i width=${2:-80}
-  ((VERBOSE >= 0)) || return 0
-  local -- line
-  printf -v line '%*s' "$width" ''
-  echo "${line// /$char}"
-}
 
 require_arg() { (($# > 1)) || { log_error "Option ${1@Q} requires an argument"; return 22; }; }
 
@@ -153,9 +145,9 @@ execute_on_all_hosts() {
   log_info 'Discovering SSH hosts...'
 
   local -a lhssh_scan_opts=(-p)
-  ((IPV6_SCAN)) && lhssh_scan_opts+=(-6)
+  ((IPV6_SCAN)) && lhssh_scan_opts+=(-6) ||:
   [[ -z "$IPV6_INTERFACE" ]] || lhssh_scan_opts+=(-I "$IPV6_INTERFACE")
-  mapfile -t hosts < <("$LHSSH_CMD" "${lhssh_scan_opts[@]}" || true)
+  readarray -t hosts < <("$LHSSH_CMD" "${lhssh_scan_opts[@]}" || true)
 
   if ((${#hosts[@]} == 0)); then
     log_error 'No SSH hosts found'
@@ -163,7 +155,6 @@ execute_on_all_hosts() {
   fi
 
   log_info "Found ${#hosts[@]} hosts: ${hosts[*]}"
-  msg_line "="
 
   local -i total=${#hosts[@]}
   local -i failed=0
@@ -195,7 +186,7 @@ execute_on_all_hosts() {
     done
   fi
 
-  msg_line '='
+  msg ''
   msg_success 'Execution complete'
   msg "  Total hosts: $total"
   msg "  Successful: $((total - failed))"
@@ -204,7 +195,7 @@ execute_on_all_hosts() {
   ((failed == 0))
 }
 
-usage() {
+show_help() {
   cat <<USAGE
 $SCRIPT_NAME $VERSION - Execute commands on multiple SSH hosts
 
@@ -269,8 +260,7 @@ main() {
   while (($#)); do
     case "$1" in
       -h|--help)
-        usage
-        msg_line '-'
+        show_help
         "$LHSSH_CMD" --help || true
         return 0
         ;;
@@ -317,7 +307,7 @@ main() {
 
       -*)
         log_error "Unknown option ${1@Q}"
-        >&2 usage
+        >&2 show_help
         return 22
         ;;
       *)
@@ -329,7 +319,7 @@ main() {
 
   if ((${#command[@]} == 0)); then
     log_error 'No command specified'
-    >&2 usage
+    >&2 show_help
     return 22
   fi
 

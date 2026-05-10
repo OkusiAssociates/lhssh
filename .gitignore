@@ -12,6 +12,7 @@ DEVELOPMENT.md
 build/
 CHANGES.md
 CLAUDE.md
+.claude/
 .coverage
 coverage_html/
 curtest.sh

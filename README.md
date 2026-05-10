@@ -155,7 +155,6 @@ Configuration is loaded in layers (each overrides the previous):
 
 1. **System defaults**: `/etc/lhssh/lhssh.conf`
 2. **User config** (first found):
-   - `~/.lhssh.conf` (legacy)
    - `~/.config/lhssh/lhssh.conf` (XDG)
    - `/usr/local/etc/lhssh/lhssh.conf`
 

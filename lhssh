@@ -214,13 +214,13 @@ create_config_file() {
 #!/bin/bash
 # $SCRIPT_NAME: Display ssh accessible localhosts / Run commands on localhosts
 # [IPv4] localhost header (e.g. 192.168.1.); omit last number; end with dot
-LOCALHOST_HEAD='$LOCALHOST_HEAD'
+LOCALHOST_HEAD=$LOCALHOST_HEAD
 # [IPv4] start scanning from this IP
 LOCALHOST_START_IP=$LOCALHOST_START_IP
 # [IPv4] stop scanning at this IP
 LOCALHOST_END_IP=$LOCALHOST_END_IP
 # [shared] ssh login username
-LOGIN_USERNAME='$LOGIN_USERNAME'
+LOGIN_USERNAME=$LOGIN_USERNAME
 # [shared] short display of IPs only
 SHORT_DISPLAY=$SHORT_DISPLAY
 # [shared] supershort display (last octet for IPv4; full address for IPv6)
@@ -254,7 +254,6 @@ load_config() {
   # User config overrides (first found wins)
   local -- conf_file
   local -a search_paths=(
-    "$HOME"/."$SCRIPT_NAME".conf
     "${XDG_CONFIG_HOME:-$HOME/.config}"/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
     /usr/local/etc/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
     /usr/share/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
@@ -367,9 +366,9 @@ scan_hosts() {
   local -- start_ip=${1:-$LOCALHOST_START_IP}
   local -- end_ip=${2:-$LOCALHOST_END_IP}
 
-  if command -v ssh-keyscan >/dev/null 2>&1; then
+  if command -v ssh-keyscan &>/dev/null; then
     scan_ssh_hosts_keyscan "$start_ip" "$end_ip"
-  elif command -v nc >/dev/null 2>&1; then
+  elif command -v nc &>/dev/null; then
     scan_ssh_hosts_nc "$start_ip" "$end_ip"
   else
     log_error 'No suitable scanning tool found (ssh-keyscan or nc required)'
@@ -383,9 +382,9 @@ format_output() {
 
   local -a hosts
   if ((is_ipv6)); then
-    mapfile -t hosts < <(printf '%s\n' "$@" | sort)
+    readarray -t hosts < <(printf '%s\n' "$@" | sort)
   else
-    mapfile -t hosts < <(printf '%s\n' "$@" | sort -t. -k4 -n)
+    readarray -t hosts < <(printf '%s\n' "$@" | sort -t. -k4 -n)
   fi
   local -- host
 
@@ -406,14 +405,13 @@ format_output() {
       fi
     done
   else
-    echo 'SSH Hosts Found:'
-    echo '================'
+    >&2 echo 'SSH Hosts Found:'
     local -- hostname col_width=15
     ((is_ipv6)) && col_width=45
     for host in "${hosts[@]}"; do
       hostname=$(getent hosts "$host" 2>/dev/null | awk '{print $2}' || echo "")
       if [[ -n "$hostname" ]]; then
-        printf "%-${col_width}s %s\n" "$host" "($hostname)"
+        printf "%-${col_width}s %s\n" "$host" "$hostname"
       else
         echo "$host"
       fi
@@ -496,18 +494,18 @@ unkill_host() {
 # List currently blocked IPs
 list_killed() {
   if ! sudo nft list table inet "$NFT_TABLE" &>/dev/null; then
-    echo "No blocked hosts"
+    echo 'No blocked hosts'
     return 0
   fi
 
   local -a blocked=()
-  mapfile -t blocked < <(sudo nft list chain inet "$NFT_TABLE" "$NFT_CHAIN" 2>/dev/null \
+  readarray -t blocked < <(sudo nft list chain inet "$NFT_TABLE" "$NFT_CHAIN" 2>/dev/null \
     | grep 'saddr .* drop' | awk '{for(i=1;i<=NF;i++) if($i=="saddr") print $(i+1)}')
 
   if ((${#blocked[@]} == 0)); then
-    echo "No blocked hosts"
+    echo 'No blocked hosts'
   else
-    echo "Blocked hosts (temporary — cleared on reboot):"
+    echo 'Blocked hosts (temporary — cleared on reboot):'
     printf '  %s\n' "${blocked[@]}"
   fi
 }
@@ -669,7 +667,7 @@ main() {
 
       -*)
         log_error "Unknown option ${1@Q}"
-        show_help >&2
+        >&2 show_help
         return 22
         ;;
       *)
@@ -691,7 +689,7 @@ main() {
     scan)
       # Scan network for SSH hosts
       local -a hosts
-      mapfile -t hosts < <(scan_hosts)  # Read scan results into array
+      readarray -t hosts < <(scan_hosts)  # Read scan results into array
 
       log_debug "Found ${#hosts[@]} hosts"
 
