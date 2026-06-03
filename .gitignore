@@ -76,3 +76,4 @@ venv/
 .vscode/
 *.vtt
 *.wav
+.archive/

@@ -19,6 +19,11 @@ declare -- LHSSH_CMD=lhssh
 declare -i IPV6_SCAN=0
 declare -- IPV6_INTERFACE=''
 
+# BCS1101: PIDs of parallel-mode children, so cleanup() can terminate them on
+# signal instead of leaving orphaned ssh sessions. Populated in parallel mode,
+# cleared once all jobs are reaped.
+declare -a JOB_PIDS=()
+
 # Color codes (readonly; COLOR_OUTPUT flag controls runtime output)
 if [[ -t 1 && -t 2 ]] && [[ -z "${NO_COLOR:-}" ]] && tput colors &>/dev/null; then
   declare -r RED=$'\033[0;31m' GREEN=$'\033[0;32m' YELLOW=$'\033[0;33m' \
@@ -64,8 +69,10 @@ log_warn() { log WARN "$@"; }
 log_info() { log INFO "$@"; }
 log_debug() { log DEBUG "$@"; }
 
-# Output helpers with distinct behavior (not aliases of log_*)
-msg() { ((VERBOSE >= 0)) || return 0; echo -e "$*"; }
+# Status/summary helpers (not aliases of log_*). BCS0702: these write to stderr
+# so stdout carries only per-host command output, keeping `lhssh-cmd ... | …`
+# pipelines clean. Suppressed when quiet (VERBOSE < 0).
+msg() { ((VERBOSE >= 0)) || return 0; >&2 echo -e "$*"; }
 msg_success() {
   ((VERBOSE >= 0)) || return 0
   local -- g='' n=''
@@ -88,6 +95,8 @@ error_msg() {
     23)  echo 'Network error' ;;
     24)  echo 'Operation timed out' ;;
     25)  echo 'Host unreachable' ;;
+    124) echo 'Operation timed out' ;;
+    137) echo 'Killed after timeout' ;;
     126) echo 'Command cannot execute' ;;
     127) echo 'Command not found' ;;
     130) echo 'Interrupted by Ctrl+C' ;;
@@ -100,6 +109,11 @@ error_msg() {
 cleanup() {
   trap - SIGINT SIGTERM EXIT
   local -i exit_code=${1:-$?}
+  # BCS1101: terminate any parallel children still running (e.g. on Ctrl-C) so
+  # they are not orphaned. Stale/finished PIDs error harmlessly (suppressed).
+  if ((${#JOB_PIDS[@]})); then
+    kill "${JOB_PIDS[@]}" 2>/dev/null ||:
+  fi
   # SSH already provides detailed error messages
   if ((exit_code != 0 && exit_code != 255)); then
     log_error "Exit: $(error_msg "$exit_code")"
@@ -126,9 +140,11 @@ execute_on_host() {
   # Let lhssh stderr flow through directly (already prefixed by lhssh)
   if output=$("$LHSSH_CMD" "${lhssh_opts[@]}" "$host" -- "${command[@]}"); then
     if [[ -n "$output" ]]; then
+      # Real remote output is program data — keep it on stdout (BCS0702)
       echo -e "${g}[$host]${n} $output"
     elif ((VERBOSE >= 1)); then
-      echo -e "${g}[$host]${n} Command completed successfully"
+      # Status note, not data — to stderr (BCS0702)
+      >&2 echo -e "${g}[$host]${n} Command completed successfully"
     fi
   else
     exit_code=$?
@@ -166,6 +182,7 @@ execute_on_all_hosts() {
     local -- host
     for host in "${hosts[@]}"; do
       execute_on_host "$host" "${command[@]}" &
+      JOB_PIDS+=("$!")    # BCS1101: track so cleanup() can kill on signal
       running+=1
       if ((running >= MAX_PARALLEL)); then
         wait -n || failed+=1
@@ -176,6 +193,7 @@ execute_on_all_hosts() {
       wait -n || failed+=1
       running+=-1
     done
+    JOB_PIDS=()           # all reaped — nothing left for cleanup() to kill
   else
     local -i i=1
     local -- host
@@ -279,7 +297,10 @@ main() {
         ;;
       -P|--max-parallel)
         require_arg "$@"; shift
-        MAX_PARALLEL=$1
+        # Validate integer before the -i assignment: a non-numeric value would
+        # silently coerce to 0, and a float (3.5) would abort under set -e.
+        [[ "$1" =~ ^[0-9]+$ ]] || { log_error "Option -P expects a number, got ${1@Q}"; return 9; }
+        MAX_PARALLEL=$((10#$1))
         ((MAX_PARALLEL >= 1)) || { log_error 'Max parallel must be >= 1'; return 9; }
         ;;
       -6|--ipv6)

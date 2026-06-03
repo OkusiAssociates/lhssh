@@ -3,15 +3,17 @@
 #
 # Description:
 #   A modern, dependency-free bash utility for scanning and managing SSH connections
-#   to hosts on the local network. Supports parallel scanning, colored output,
-#   and flexible configuration.
+#   to hosts on the local network. Supports parallel scanning, IPv6 link-local
+#   discovery, colored output, temporary host blocking via nft, and flexible
+#   configuration.
 #
 # Dependencies:
 #   - ssh (OpenSSH client)
 #   - ssh-keyscan OR nc (netcat) for network scanning
 #   - timeout (coreutils)
 #   - ping6 or ping, and ip (iproute2) for IPv6 (-6) scanning
-#   - Standard Unix tools: grep, sort, xargs, awk, sed, getent, tput, realpath
+#   - nft (nftables) and sudo for host blocking (-K/-U/-L)
+#   - Standard Unix tools: grep, sort, cut, head, xargs, awk, sed, getent, tput, realpath
 #
 # Author: OKUSI Project
 # Version: 2.0.0
@@ -34,7 +36,8 @@ declare -r SCRIPT_NAME=${SCRIPT_PATH##*/}
 declare -- CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}"/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
 
 # Default configuration variables
-# Overridden by /etc/lhssh.conf (system) then user config (see load_config)
+# Overridden by system config (/etc/lhssh/lhssh.conf or /etc/lhssh.conf) then
+# user config (see load_config)
 declare -- LOCALHOST_HEAD='192.168.1.'      # Network prefix (must end with dot)
 declare -i LOCALHOST_START_IP=50            # First IP in scan range (last octet)
 declare -i LOCALHOST_END_IP=230             # Last IP in scan range (last octet)
@@ -473,7 +476,8 @@ format_output() {
   local -- host
 
   if ((SUPER_SHORT || SHORT_DISPLAY)); then
-    local -- label
+    # BCS0503: declare loop-body locals once, outside the for loop
+    local -- label hn
     for host in "${hosts[@]}"; do
       # Truncate to last octet only for IPv4 entries (decided per element)
       if ((SUPER_SHORT)) && [[ "$host" != *:* ]]; then
@@ -482,8 +486,7 @@ format_output() {
         label="$host"
       fi
       if ((SHOW_HOSTNAME)); then
-        local -- hn
-        hn=$(getent hosts "$host" 2>/dev/null | awk '{print $2}' || true)
+        hn=$(getent hosts "$host" 2>/dev/null | awk '{print $2}' ||:)
         printf '%s\t%s\n' "$label" "$hn"
       else
         echo "$label"
@@ -492,7 +495,8 @@ format_output() {
   else
     if ((VERBOSE >= 0)); then >&2 echo 'SSH Hosts Found:'; fi
     local -- hostname col_width=15
-    ((has_ipv6)) && col_width=45
+    # BCS0606: terminate the arithmetic && chain so a false test can't leak rc=1
+    ((has_ipv6)) && col_width=45 ||:
     for host in "${hosts[@]}"; do
       hostname=$(getent hosts "$host" 2>/dev/null | awk '{print $2}' || echo "")
       if [[ -n "$hostname" ]]; then
@@ -675,6 +679,9 @@ main() {
   local -a args=()
   local -a ssh_command=()
   local -- action=scan
+  # BCS0503: hoisted out of the -n case below (declared once, not per loop pass).
+  # oct is the bounded 0-255 octet pattern reused for network-prefix validation.
+  local -- net oct='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
 
   # Load configuration first
   load_config
@@ -711,7 +718,7 @@ main() {
         ;;
       -n|--network)
         require_arg "$@"; shift
-        local -- net=$1 oct='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+        net=$1
         if [[ "$net" == */* ]]; then
           # CIDR: only /24 maps onto last-octet scanning; reject other masks loudly
           if [[ ! "$net" =~ ^${oct}(\.${oct}){3}/24$ ]]; then
@@ -757,7 +764,7 @@ main() {
         SSH_SESSION_TIMEOUT=$((10#$1))
         ;;
       -l|--list)
-        grep -v '^#!' "$CONFIG_FILE" 2>/dev/null || true
+        grep -v '^#!' "$CONFIG_FILE" 2>/dev/null ||:
         return 0
         ;;
       -e|--edit)
