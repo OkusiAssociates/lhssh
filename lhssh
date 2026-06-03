@@ -10,11 +10,17 @@
 #   - ssh (OpenSSH client)
 #   - ssh-keyscan OR nc (netcat) for network scanning
 #   - timeout (coreutils)
-#   - Standard Unix tools: grep, sort, xargs, awk, getent, tput, realpath
+#   - ping6 or ping, and ip (iproute2) for IPv6 (-6) scanning
+#   - Standard Unix tools: grep, sort, xargs, awk, sed, getent, tput, realpath
 #
 # Author: OKUSI Project
 # Version: 2.0.0
 # License: GPL-3.0
+# Guard before any version-dependent feature (inherit_errexit needs Bash 4.4+).
+if ((BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 2))); then
+  >&2 echo "${0##*/}: requires Bash >= 5.2 (have ${BASH_VERSION:-unknown})"
+  exit 2
+fi
 set -euo pipefail
 shopt -s inherit_errexit
 
@@ -43,6 +49,7 @@ declare -i COLOR_OUTPUT=1                   # Enable colored output (0=disable)
 declare -i PARALLEL_SCAN=1                  # Use parallel scanning (0=sequential)
 declare -i IPV6_SCAN=0                      # Scan IPv6 instead of IPv4
 declare -- IPV6_INTERFACE=''                # IPv6 interface (empty=auto-detect)
+declare -i SUPPRESS_EXIT_LOG=0              # Skip cleanup error log once ssh takes over
 
 # Color codes (readonly; --no-color controls output via COLOR_OUTPUT flag)
 if [[ -t 1 && -t 2 ]] && [[ -z "${NO_COLOR:-}" ]] && tput colors &>/dev/null; then
@@ -54,7 +61,16 @@ fi
 
 # Validate that an option's required argument is present
 # Usage: require_arg "$@" (call before shift in option parsing)
-require_arg() { (($# > 1)) || { log_error "Option ${1@Q} requires an argument"; return 22; }; }
+require_arg() { (($# > 1)) || { log_error "Option ${1@Q} requires an argument"; return 8; }; }
+
+# Validate $1 is an integer within [min,max]. Usage: require_int VALUE MIN MAX FLAG
+# Returns 9 (value out of range) on failure. Use 10# at the call site to coerce.
+require_int() {
+  local -- val=$1 flag=$4
+  local -i min=$2 max=$3
+  [[ "$val" =~ ^[0-9]+$ ]] || { log_error "Option $flag expects a number, got ${val@Q}"; return 9; }
+  ((10#$val >= min && 10#$val <= max)) || { log_error "Option $flag out of range [$min-$max]: ${val@Q}"; return 9; }
+}
 
 log() {
   local -- level=$1
@@ -107,6 +123,8 @@ error_msg() {
     23)  echo 'Network error' ;;
     24)  echo 'Operation timed out' ;;
     25)  echo 'Host unreachable' ;;
+    124) echo 'Operation timed out' ;;
+    137) echo 'Killed after timeout' ;;
     126) echo 'Command cannot execute' ;;
     127) echo 'Command not found' ;;
     130) echo 'Interrupted by Ctrl+C' ;;
@@ -118,9 +136,9 @@ error_msg() {
 cleanup() {
   trap - SIGINT SIGTERM EXIT
   local -i exit_code=${1:-$?}
-  # Only log error if it's not an SSH connection failure (255)
-  # SSH already provides detailed error messages
-  if ((exit_code != 0 && exit_code != 255)); then
+  # Don't log when SSH failed (255) or when control already passed to ssh —
+  # in connect mode the exit code belongs to the remote command, not lhssh.
+  if ((exit_code != 0 && exit_code != 255 && !SUPPRESS_EXIT_LOG)); then
     log_error "Exit: $(error_msg "$exit_code")"
   fi
   exit "$exit_code"
@@ -147,7 +165,7 @@ OPTIONS:
 
   Display Options:
   -s, --short             Show IP addresses only
-  -p, --supershort        Show only last octet of IP addresses
+  -p, --supershort        Show only last octet (IPv4); full address (IPv6)
   -H, --with-hostname     Add hostname to -s/-p output (tab-separated)
   -C, --no-color          Disable colored output
 
@@ -241,38 +259,92 @@ CONFIG
   log_info "Created configuration file ${CONFIG_FILE@Q}"
 }
 
+# Whitelisted config keys. Integer keys accept only numeric values; string keys
+# are assigned literally. Anything else in a config file is ignored.
+declare -ra CONFIG_INT_KEYS=(
+  LOCALHOST_START_IP LOCALHOST_END_IP SHORT_DISPLAY SUPER_SHORT SHOW_HOSTNAME
+  SSH_CONNECT_TIMEOUT SSH_SESSION_TIMEOUT COLOR_OUTPUT PARALLEL_SCAN
+)
+declare -ra CONFIG_STR_KEYS=(LOCALHOST_HEAD LOGIN_USERNAME IPV6_INTERFACE)
+
+# Read KEY=VALUE pairs from a config file into whitelisted globals.
+# The file is parsed, never sourced, so a config file can NEVER execute code —
+# this closes the arbitrary-execution hole of sourcing attacker-plantable files.
+parse_config_file() {
+  local -- file=$1
+  local -- line key value k
+  local -i lineno=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    lineno+=1
+    # Trim surrounding whitespace
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    # Skip blanks, comments, shebang, #fin
+    [[ -z "$line" || "$line" == '#'* || "$line" == '!'* ]] && continue
+    if [[ "$line" != *=* ]]; then
+      log_warn "Ignoring malformed config line $lineno in ${file@Q}"
+      continue
+    fi
+    key=${line%%=*}; key=${key//[[:space:]]/}
+    value=${line#*=}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    # Strip one layer of surrounding matching quotes
+    if ((${#value} >= 2)) && { [[ "$value" == \"*\" ]] || [[ "$value" == \'*\' ]]; }; then
+      value=${value:1:-1}
+    fi
+    # Integer key: accept only a pure integer (blocks any arithmetic/command eval)
+    for k in "${CONFIG_INT_KEYS[@]}"; do
+      if [[ "$key" == "$k" ]]; then
+        if [[ "$value" =~ ^-?[0-9]+$ ]]; then
+          printf -v "$key" '%s' "$value"
+        else
+          log_warn "Ignoring non-numeric value for $key in ${file@Q}: ${value@Q}"
+        fi
+        continue 2
+      fi
+    done
+    # String key: assign literally, no evaluation
+    for k in "${CONFIG_STR_KEYS[@]}"; do
+      if [[ "$key" == "$k" ]]; then
+        printf -v "$key" '%s' "$value"
+        continue 2
+      fi
+    done
+    log_warn "Ignoring unknown config key ${key@Q} in ${file@Q}"
+  done < "$file"
+}
+
 load_config() {
-  # System-wide defaults first
+  # System-wide defaults first (parsed, not sourced). Only root-managed /etc.
   if [[ -f /etc/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf ]]; then
-    # shellcheck source=/dev/null
-    source /etc/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
+    parse_config_file /etc/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
   elif [[ -f /etc/"$SCRIPT_NAME".conf ]]; then
-    # shellcheck source=/dev/null
-    source /etc/"$SCRIPT_NAME".conf
+    parse_config_file /etc/"$SCRIPT_NAME".conf
   fi
 
-  # User config overrides (first found wins)
+  # User config overrides (first found wins). ONLY user-owned $HOME locations are
+  # searched. Package/data dirs (/usr/local/etc, /usr/share, /usr/lib) are
+  # deliberately excluded: they may be writable by non-root accounts and were a
+  # code-execution vector when configs were sourced.
   local -- conf_file
   local -a search_paths=(
-    "${XDG_CONFIG_HOME:-$HOME/.config}"/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
-    /usr/local/etc/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
-    /usr/share/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
-    /usr/lib/"$SCRIPT_NAME"/"$SCRIPT_NAME".conf
+    "$HOME/.$SCRIPT_NAME.conf"                                          # legacy
+    "${XDG_CONFIG_HOME:-$HOME/.config}/$SCRIPT_NAME/$SCRIPT_NAME.conf"  # XDG
   )
   for conf_file in "${search_paths[@]}"; do
     if [[ -f "$conf_file" ]]; then
-      # shellcheck source=/dev/null
-      source "$conf_file" || {
-        log_error "Failed to load config file ${conf_file@Q}"
-        return 1
-      }
+      parse_config_file "$conf_file"
       CONFIG_FILE=$conf_file
       return 0
     fi
   done
 
-  # No config found — create default
-  create_config_file
+  # No config file found — fall back to built-in defaults. CONFIG_FILE keeps its
+  # XDG default so -S/-e and the lazy creation in main() target it. We do NOT
+  # create a file here, so read-only commands (--help/--version/-l/-L) have no
+  # filesystem side effect.
+  return 0
 }
 
 # Generate IP list for a scan range to stdout
@@ -297,8 +369,13 @@ detect_ipv6_interface() {
 # Discover IPv6 neighbors via all-nodes multicast ping
 discover_ipv6_neighbors() {
   local -- iface=$1
-  local -i timeout_ms=$((SSH_CONNECT_TIMEOUT * 1000))
-  ping6 -c 2 -W "$timeout_ms" "ff02::1%${iface}" 2>/dev/null \
+  # ping6 -W is the response-wait timeout in SECONDS. The old code passed
+  # milliseconds (SSH_CONNECT_TIMEOUT * 1000), 1000x too large, which hung the
+  # scan for hours on a quiet/empty IPv6 link.
+  # Prefer ping6; fall back to `ping -6` on systems that dropped the alias.
+  local -a ping_cmd=(ping6)
+  command -v ping6 &>/dev/null || ping_cmd=(ping -6)
+  "${ping_cmd[@]}" -c 2 -W "$SSH_CONNECT_TIMEOUT" "ff02::1%${iface}" 2>/dev/null \
     | awk '/from /{print $4}' \
     | sed 's/:$//' \
     | sort -u
@@ -377,21 +454,29 @@ scan_hosts() {
 }
 
 format_output() {
-  local -i is_ipv6=0
-  [[ "${1:-}" == *:* ]] && is_ipv6=1
+  # Family is derived from the whole set, not just $1, so a mixed/misordered
+  # list is not mis-formatted by guessing from the first element.
+  local -i has_ipv6=0
+  local -- a
+  for a in "$@"; do
+    [[ "$a" == *:* ]] && { has_ipv6=1; break; }
+  done
 
   local -a hosts
-  if ((is_ipv6)); then
+  if ((has_ipv6)); then
     readarray -t hosts < <(printf '%s\n' "$@" | sort)
   else
-    readarray -t hosts < <(printf '%s\n' "$@" | sort -t. -k4 -n)
+    # Sort by the LAST dotted field numerically. Works for any prefix length
+    # (e.g. 10.0. -> 3-field addresses), unlike a hardcoded `-k4`.
+    readarray -t hosts < <(printf '%s\n' "$@" | awk -F. '{print $NF"\t"$0}' | sort -n | cut -f2-)
   fi
   local -- host
 
   if ((SUPER_SHORT || SHORT_DISPLAY)); then
     local -- label
     for host in "${hosts[@]}"; do
-      if ((SUPER_SHORT && !is_ipv6)); then
+      # Truncate to last octet only for IPv4 entries (decided per element)
+      if ((SUPER_SHORT)) && [[ "$host" != *:* ]]; then
         label="${host##*.}"
       else
         label="$host"
@@ -405,9 +490,9 @@ format_output() {
       fi
     done
   else
-    >&2 echo 'SSH Hosts Found:'
+    if ((VERBOSE >= 0)); then >&2 echo 'SSH Hosts Found:'; fi
     local -- hostname col_width=15
-    ((is_ipv6)) && col_width=45
+    ((has_ipv6)) && col_width=45
     for host in "${hosts[@]}"; do
       hostname=$(getent hosts "$host" 2>/dev/null | awk '{print $2}' || echo "")
       if [[ -n "$hostname" ]]; then
@@ -429,8 +514,8 @@ validate_ip() {
     [[ "$ip" =~ ^[a-fA-F0-9:.]+(%[a-zA-Z0-9._-]+)?$ ]] || {
       log_error "Invalid IPv6 address ${ip@Q}"; return 22
     }
-  elif [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    :
+  elif [[ "$ip" =~ ^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$ ]]; then
+    : # bounded 0-255 per octet, leading zeros rejected
   else
     log_error "Invalid IP address ${ip@Q} (use full IP, not short octet)"
     return 22
@@ -442,7 +527,10 @@ nft_ensure_chain() {
   sudo nft list table inet "$NFT_TABLE" &>/dev/null && return 0
   log_info "Creating nft table inet ${NFT_TABLE}"
   sudo nft add table inet "$NFT_TABLE" || { log_error 'Failed to create nft table (need sudo?)'; return 1; }
-  sudo nft add chain inet "$NFT_TABLE" "$NFT_CHAIN" '{ type filter hook forward priority 0; policy accept; }'
+  # hook input: a drop rule must see traffic destined to THIS host. The forward
+  # hook only sees routed/forwarded traffic, which a non-gateway box never has,
+  # so a forward-chain block would silently do nothing.
+  sudo nft add chain inet "$NFT_TABLE" "$NFT_CHAIN" '{ type filter hook input priority 0; policy accept; }'
 }
 
 # Block an IP via nft (temporary — cleared on reboot)
@@ -451,13 +539,21 @@ kill_host() {
   validate_ip "$ip" || return $?
   nft_ensure_chain || return $?
 
+  # Select the nft match family by address type; strip any %zone suffix, which
+  # nft does not accept in an saddr match.
+  local -- proto=ip match=$ip
+  if [[ "$ip" == *:* ]]; then
+    proto=ip6
+    match=${ip%%\%*}
+  fi
+
   # Check if already blocked
-  if sudo nft list chain inet "$NFT_TABLE" "$NFT_CHAIN" 2>/dev/null | grep -q "saddr $ip "; then
+  if sudo nft list chain inet "$NFT_TABLE" "$NFT_CHAIN" 2>/dev/null | grep -q "saddr $match "; then
     log_warn "Host ${ip} is already blocked"
     return 0
   fi
 
-  if sudo nft add rule inet "$NFT_TABLE" "$NFT_CHAIN" ip saddr "$ip" drop; then
+  if sudo nft add rule inet "$NFT_TABLE" "$NFT_CHAIN" "$proto" saddr "$match" drop; then
     log_info "Blocked ${ip} (temporary — cleared on reboot)"
   else
     log_error "Failed to block ${ip}"; return 1
@@ -474,10 +570,14 @@ unkill_host() {
     return 0
   fi
 
+  # Strip any %zone suffix to match the stored rule
+  local -- match=$ip
+  [[ "$ip" == *:* ]] && match=${ip%%\%*}
+
   # Find and delete the matching rule handle
   local -- handle
   handle=$(sudo nft -a list chain inet "$NFT_TABLE" "$NFT_CHAIN" 2>/dev/null \
-    | grep "saddr $ip " | awk '{print $NF}')
+    | grep "saddr $match " | awk '{print $NF}')
 
   if [[ -z "$handle" ]]; then
     log_warn "Host ${ip} is not blocked"
@@ -515,18 +615,28 @@ ssh_connect() {
   shift
   local -a ssh_args=("$@")
 
-  # IPv6 (colon) passes through; short octet expands via LOCALHOST_HEAD; dotted IPv4 passes through
+  # TARGET is one of: IPv6 (has colon), full dotted IPv4 (has dot), or a short
+  # octet (expanded via LOCALHOST_HEAD). Each form is validated — a dotted
+  # target is NOT passed through unchecked.
+  local -- oct='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
   if [[ "$target" =~ : ]]; then
     if [[ ! "$target" =~ ^[a-fA-F0-9:.]+(%[a-zA-Z0-9._-]+)?$ ]]; then
       log_error "Invalid IPv6 address ${target@Q}"
       return 22
     fi
-  elif [[ ! "$target" =~ \. ]]; then
-    if [[ ! "$target" =~ ^[0-9]+$ ]] || ((target < 1 || target > 254)); then
+  elif [[ "$target" =~ \. ]]; then
+    # Full dotted IPv4 — validate four bounded octets (docs: TARGET is IPv4/IPv6/octet)
+    if [[ ! "$target" =~ ^${oct}(\.${oct}){3}$ ]]; then
+      log_error "Invalid IPv4 address ${target@Q}"
+      return 22
+    fi
+  else
+    # Short octet. 10# forces base-10 so leading-zero octets (08/09) don't abort as bad octal
+    if [[ ! "$target" =~ ^[0-9]+$ ]] || ((10#$target < 1 || 10#$target > 254)); then
       log_error "Invalid IP octet ${target@Q} (must be 1-254)"
       return 22
     fi
-    target="${LOCALHOST_HEAD}${target}"
+    target="${LOCALHOST_HEAD}$((10#$target))"
   fi
 
   local -a ssh_opts=(
@@ -535,9 +645,20 @@ ssh_connect() {
     -o 'StrictHostKeyChecking=accept-new'
   )
 
-  ((VERBOSE==0)) || ssh_opts+=(-v)
+  # Map verbosity to ssh -v levels. Quiet (VERBOSE=-1) and normal (0) add none;
+  # the old `((VERBOSE==0)) || -v` wrongly made --quiet pass ssh -v.
+  if ((VERBOSE >= 2)); then
+    ssh_opts+=(-v -v)
+  elif ((VERBOSE == 1)); then
+    ssh_opts+=(-v)
+  fi
 
   log_info "Connecting to ${LOGIN_USERNAME}@${target}"
+
+  # From here the exit status belongs to ssh / the remote command, not lhssh —
+  # stop the cleanup trap from relabelling it as an lhssh error (GAP: e.g.
+  # `lhssh 152 'grep foo x'` returning 1 must not print "[ERROR] General error").
+  SUPPRESS_EXIT_LOG=1
 
   if ((${#ssh_args[@]})); then
     # Execute command with timeout protection
@@ -590,23 +711,36 @@ main() {
         ;;
       -n|--network)
         require_arg "$@"; shift
-        if [[ "$1" =~ /24$ ]]; then
-          # CIDR /24 notation: extract first 3 octets as prefix
-          LOCALHOST_HEAD="${1%/24}"
-          LOCALHOST_HEAD="${LOCALHOST_HEAD%.*}."
+        local -- net=$1 oct='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+        if [[ "$net" == */* ]]; then
+          # CIDR: only /24 maps onto last-octet scanning; reject other masks loudly
+          if [[ ! "$net" =~ ^${oct}(\.${oct}){3}/24$ ]]; then
+            log_error "Only /24 CIDR is supported for -n: ${net@Q}"
+            return 22
+          fi
+          net=${net%/24}
+          LOCALHOST_HEAD="${net%.*}."   # drop host octet -> 3-octet prefix + dot
           LOCALHOST_START_IP=1
           LOCALHOST_END_IP=254
         else
-          LOCALHOST_HEAD="${1%.}."  # Ensure it ends with dot
+          net=${net%.}                  # tolerate a trailing dot
+          # Must be 1-3 bounded dotted-decimal octets (a prefix), not arbitrary text
+          if [[ ! "$net" =~ ^${oct}(\.${oct}){0,2}$ ]]; then
+            log_error "Invalid network prefix ${1@Q} (e.g. 192.168.1. or 10.0.0.0/24)"
+            return 22
+          fi
+          LOCALHOST_HEAD="${net}."
         fi
         ;;
       -b|--begin)
         require_arg "$@"; shift
-        LOCALHOST_START_IP=$1
+        require_int "$1" 0 255 -b || return $?
+        LOCALHOST_START_IP=$((10#$1))
         ;;
       -f|--finish)
         require_arg "$@"; shift
-        LOCALHOST_END_IP=$1
+        require_int "$1" 0 255 -f || return $?
+        LOCALHOST_END_IP=$((10#$1))
         ;;
       -u|--user)
         require_arg "$@"; shift
@@ -614,17 +748,20 @@ main() {
         ;;
       -t|--timeout)
         require_arg "$@"; shift
-        SSH_CONNECT_TIMEOUT=$1
+        require_int "$1" 1 86400 -t || return $?
+        SSH_CONNECT_TIMEOUT=$((10#$1))
         ;;
       -T|--session-time)
         require_arg "$@"; shift
-        SSH_SESSION_TIMEOUT=$1
+        require_int "$1" 1 86400 -T || return $?
+        SSH_SESSION_TIMEOUT=$((10#$1))
         ;;
       -l|--list)
         grep -v '^#!' "$CONFIG_FILE" 2>/dev/null || true
         return 0
         ;;
       -e|--edit)
+        [[ -f "$CONFIG_FILE" ]] || create_config_file
         "${EDITOR:-nano}" "$CONFIG_FILE"
         return 0
         ;;
@@ -655,13 +792,17 @@ main() {
         return 0
         ;;
       --)
+        # Stop option parsing. Remaining tokens are positional: first is the
+        # target, rest are the ssh command (resolved in the dispatch block).
         shift
-        ssh_command=("$@")
+        args+=("$@")
         break
         ;;
 
-      # Handle combined short options (e.g., -vp becomes -v -p)
-      -[hVvqspHCleSnbfutT6]?*) set -- "${1:0:2}" "-${1:2}" "${@:2}"
+      # Handle combined short options (e.g., -vp becomes -v -p).
+      # Boolean flags ONLY — argument-taking flags (-n -b -f -u -t -T -I -K -U)
+      # are excluded so attached values like -n10.0.0. are not silently mangled.
+      -[hVvqspHCleSL6]?*) set -- "${1:0:2}" "-${1:2}" "${@:2}"
         continue
         ;;
 
@@ -685,8 +826,26 @@ main() {
     ssh_command+=("${args[@]:1}")
   fi
 
+  # Create the default config on first real use (scan/connect) — not on the
+  # read-only commands above, which return before reaching here.
+  [[ -f "$CONFIG_FILE" ]] || create_config_file
+
   case "$action" in
     scan)
+      # Verify a scan tool exists BEFORE scanning. Otherwise scan_hosts' failure
+      # is swallowed by the process substitution below and misreported as
+      # "no hosts found" rather than the real "tool missing" cause.
+      if ((IPV6_SCAN)); then
+        if ! command -v ip &>/dev/null \
+          || { ! command -v ping6 &>/dev/null && ! command -v ping &>/dev/null; }; then
+          log_error 'IPv6 scan requires ip (iproute2) and ping6 or ping'
+          return 23
+        fi
+      elif ! command -v ssh-keyscan &>/dev/null && ! command -v nc &>/dev/null; then
+        log_error 'No suitable scanning tool found (ssh-keyscan or nc required)'
+        return 23
+      fi
+
       # Scan network for SSH hosts
       local -a hosts
       readarray -t hosts < <(scan_hosts)  # Read scan results into array

@@ -153,10 +153,12 @@ lhssh-cmd -- 'ps aux | grep nginx'  # Complex commands after --
 
 Configuration is loaded in layers (each overrides the previous):
 
-1. **System defaults**: `/etc/lhssh/lhssh.conf`
+1. **System defaults**: `/etc/lhssh/lhssh.conf` (or `/etc/lhssh.conf`)
 2. **User config** (first found):
+   - `~/.lhssh.conf` (legacy)
    - `~/.config/lhssh/lhssh.conf` (XDG)
-   - `/usr/local/etc/lhssh/lhssh.conf`
+
+Config files are **parsed** (`KEY=VALUE`), never sourced, so a config file cannot execute code. Only known keys are read; unknown or non-numeric values are ignored with a warning. The user config is read only from your home directory — system/package locations are not searched for user config. A default user config is created on first scan/connect (not by read-only commands like `--help`, `--version`, or `-L`).
 
 ### Configuration Variables
 

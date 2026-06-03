@@ -1,0 +1,8 @@
+#!/usr/bin/bash
+# Mock sudo for the lhssh test suite.
+# Ignores privilege escalation and runs the wrapped command directly, so
+# `sudo nft ...` resolves to the mock `nft` on PATH. Strips a leading `-n`
+# (non-interactive) if present; lhssh only ever calls `sudo nft ...`.
+[[ "${1:-}" == '-n' ]] && shift
+exec "$@"
+#fin

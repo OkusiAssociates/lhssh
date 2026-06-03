@@ -1,0 +1,103 @@
+#!/usr/bin/bash
+# Mock nft for the lhssh host-blocking test suite.
+#
+# Implements just enough of nftables to exercise nft_ensure_chain / kill_host /
+# unkill_host / list_killed. State is persisted under $NFT_STATE (default
+# $HOME/.nft), giving per-test isolation because each test gets a fresh $HOME.
+#
+# Supported forms (all under `inet <table> <chain>`):
+#   nft list table inet T                 -> exit 0 if table exists, else 1
+#   nft add table inet T                  -> create table
+#   nft add chain inet T C { ... }        -> create chain (spec recorded)
+#   nft list chain inet T C               -> print rules (indented)
+#   nft -a list chain inet T C            -> print rules with "# handle N"
+#   nft add rule inet T C <proto> saddr IP drop
+#   nft delete rule inet T C handle N
+
+set -uo pipefail
+
+state="${NFT_STATE:-$HOME/.nft}"
+table_flag="$state.table"
+chain_spec="$state.chain"
+rules="$state.rules"
+seq_file="$state.seq"
+
+# Peel a leading `-a` (handle display) wherever it appears
+declare -i show_handles=0
+declare -a argv=()
+for a in "$@"; do
+  if [[ "$a" == '-a' ]]; then show_handles=1; else argv+=("$a"); fi
+done
+set -- "${argv[@]}"
+
+cmd=${1:-}; shift || true
+
+case "$cmd" in
+  list)
+    sub=${1:-}; shift || true
+    case "$sub" in
+      table)
+        [[ -f "$table_flag" ]] && exit 0 || exit 1
+        ;;
+      chain)
+        [[ -f "$table_flag" ]] || exit 1
+        [[ -f "$rules" ]] || exit 0
+        while IFS=$'\t' read -r handle rest; do
+          [[ -z "$handle" ]] && continue
+          if ((show_handles)); then
+            printf '\t%s # handle %s\n' "$rest" "$handle"
+          else
+            printf '\t%s\n' "$rest"
+          fi
+        done < "$rules"
+        exit 0
+        ;;
+    esac
+    ;;
+  add)
+    sub=${1:-}; shift || true
+    case "$sub" in
+      table)
+        : > "$table_flag"
+        exit 0
+        ;;
+      chain)
+        : > "$table_flag"
+        # Record the full chain spec so tests can assert the hook type
+        printf '%s\n' "$*" > "$chain_spec"
+        exit 0
+        ;;
+      rule)
+        # args: inet <table> <chain> <proto> saddr <ip> drop
+        local_proto=$4
+        local_ip=$6
+        n=1
+        [[ -f "$seq_file" ]] && n=$(<"$seq_file")
+        printf '%s\t%s saddr %s drop\n' "$n" "$local_proto" "$local_ip" >> "$rules"
+        printf '%s' "$((n + 1))" > "$seq_file"
+        exit 0
+        ;;
+    esac
+    ;;
+  delete)
+    # args: rule inet <table> <chain> handle <N>
+    target=''
+    prev=''
+    for a in "$@"; do
+      [[ "$prev" == 'handle' ]] && target=$a
+      prev=$a
+    done
+    [[ -f "$rules" ]] || exit 1
+    tmp="$rules.tmp"; : > "$tmp"
+    rc=1
+    while IFS=$'\t' read -r handle rest; do
+      [[ -z "$handle" ]] && continue
+      if [[ "$handle" == "$target" ]]; then rc=0; continue; fi
+      printf '%s\t%s\n' "$handle" "$rest" >> "$tmp"
+    done < "$rules"
+    mv "$tmp" "$rules"
+    exit "$rc"
+    ;;
+esac
+exit 0
+#fin

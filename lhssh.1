@@ -253,12 +253,21 @@ Interrupted by Ctrl+C.
 .B 255
 SSH connection failed.
 .SH FILES
+Configuration files are parsed as
+.B KEY=VALUE
+pairs, never sourced, so they cannot execute code; only known keys are read and
+unknown or non-numeric values are ignored with a warning. The user config is read
+only from the home directory \(em system and package directories are not searched.
 .TP
 .I /etc/lhssh/lhssh.conf
-System-wide default configuration. Loaded first; user config overrides.
+System-wide default configuration (also \fI/etc/lhssh.conf\fR). Loaded first; user config overrides.
+.TP
+.I ~/.lhssh.conf
+Legacy user configuration. Loaded if present, before the XDG path.
 .TP
 .I ~/.config/lhssh/lhssh.conf
-XDG-compliant user configuration. Auto-created on first run if no config exists.
+XDG-compliant user configuration. Created on first scan or connect if no user config exists
+(read-only commands such as \fB\-\-help\fR, \fB\-\-version\fR and \fB\-L\fR do not create it).
 .TP
 .I /etc/bash_completion.d/lhssh
 Bash completion for lhssh and lhssh\-cmd.
